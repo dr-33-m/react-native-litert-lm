@@ -111,19 +111,21 @@ Pass an HTTPS URL to `useModel()` or `loadModel()` — the library handles the r
 If you need custom control over downloads (e.g., authentication headers for private model hosting, resumable downloads, or custom caching), use your preferred HTTP client and pass the local file path:
 
 ```typescript
-import * as FileSystem from "expo-file-system";
+import { fetch } from "expo/fetch";
+import { File, Paths } from "expo-file-system";
 import { useModel } from "react-native-litert-lm";
 
 const MODEL_URL = "https://example.com/private-model.litertlm";
-const localPath = `${FileSystem.cacheDirectory}my-model.litertlm`;
 
-// Download with custom headers, then use the local path
-await FileSystem.downloadAsync(MODEL_URL, localPath, {
+// Download with custom headers using expo/fetch
+const response = await fetch(MODEL_URL, {
   headers: { Authorization: `Bearer ${token}` },
 });
+const modelFile = new File(Paths.cache, "my-model.litertlm");
+modelFile.write(await response.bytes());
 
 // Pass the local path — no download occurs
-const { model, isReady } = useModel(localPath, { backend: "cpu" });
+const { model, isReady } = useModel(modelFile.uri, { backend: "cpu" });
 ```
 
 ## Usage
