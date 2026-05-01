@@ -169,8 +169,8 @@ export function checkMultimodalSupport(): string | undefined {
 }
 
 /**
- * Download URL for the Gemma 3n E2B IT INT4 model.
- * Note: Requires a HuggingFace account (gated model).
+ * Download URL for the Gemma 3n E2B IT INT4 model (~1.3 GB).
+ * Public — hosted on litert.dev, no authentication required.
  */
 export const GEMMA_3N_E2B_IT_INT4 =
   "https://litert.dev/gemma-3n-E2B-it-int4.litertlm";

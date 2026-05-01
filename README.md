@@ -94,35 +94,36 @@ The `example/` directory contains a fully functional test app with a dark-themed
 
 ## Model Management
 
-LiteRT-LM models (like Gemma 4) are large files (2–4 GB) and cannot be bundled into your app binary. They are downloaded at runtime.
+LiteRT-LM models (like Gemma 4) are large files (1–4 GB) and cannot be bundled into your app binary. They are downloaded at runtime.
 
 ### Automatic Downloading
 
-The library handles downloading automatically when you pass a URL to `loadModel` or `useModel`. Downloads include:
+Pass an HTTPS URL to `useModel()` or `loadModel()` — the library handles the rest:
 
 - **Progress tracking** — real-time download percentage via callbacks
 - **Local caching** — downloaded models are cached and reused across app launches
-  - **Android**: app-local temp directory
+  - **Android**: `files/models/` (app-private)
   - **iOS**: `Library/Caches/litert_models/` (survives app relaunch; reclaimable by iOS under storage pressure)
 - **HTTPS enforcement** — only secure URLs are accepted
 
-### Manual Downloading (Optional)
+### Manual Downloading
 
-If you prefer to manage downloads yourself (e.g., using `expo-file-system`), download the `.litertlm` file to a local path and pass that path to the library:
+If you need custom control over downloads (e.g., authentication headers for private model hosting, resumable downloads, or custom caching), use your preferred HTTP client and pass the local file path:
 
 ```typescript
 import * as FileSystem from "expo-file-system";
-import { GEMMA_4_E2B_IT } from "react-native-litert-lm";
+import { useModel } from "react-native-litert-lm";
 
-const localPath = `${FileSystem.documentDirectory}gemma-4-E2B-it.litertlm`;
+const MODEL_URL = "https://example.com/private-model.litertlm";
+const localPath = `${FileSystem.cacheDirectory}my-model.litertlm`;
 
-async function downloadModel() {
-  const info = await FileSystem.getInfoAsync(localPath);
-  if (info.exists) return localPath;
+// Download with custom headers, then use the local path
+await FileSystem.downloadAsync(MODEL_URL, localPath, {
+  headers: { Authorization: `Bearer ${token}` },
+});
 
-  await FileSystem.downloadAsync(GEMMA_4_E2B_IT, localPath);
-  return localPath;
-}
+// Pass the local path — no download occurs
+const { model, isReady } = useModel(localPath, { backend: "cpu" });
 ```
 
 ## Usage
@@ -307,19 +308,19 @@ const buffer = tracker.getNativeBuffer();
 
 ## Supported Models
 
-Download `.litertlm` models automatically using the exported URL constants, or manually from [HuggingFace](https://huggingface.co/litert-community):
+All exported model URLs are **public — no authentication required**. Pass them directly to `useModel()` or `loadModel()` for automatic downloading with progress tracking and local caching.
 
-| Constant               | Model                           | Size    | Min RAM | Auth Required  |
-| :--------------------- | :------------------------------ | :------ | :------ | :------------- |
-| `GEMMA_4_E2B_IT`       | Gemma 4 E2B (Multimodal, IT)    | 2.58 GB | 4 GB+   | ❌ No          |
-| `GEMMA_4_E4B_IT`       | Gemma 4 E4B (Higher Quality)    | 3.65 GB | 6 GB+   | ❌ No          |
-| `GEMMA_3N_E2B_IT_INT4` | Gemma 3n E2B (Int4, Multimodal) | ~1.3 GB | 4 GB+   | ✅ HuggingFace |
+| Constant               | Model                           | Size    | Min RAM | Source     |
+| :--------------------- | :------------------------------ | :------ | :------ | :--------- |
+| `GEMMA_4_E2B_IT`       | Gemma 4 E2B (Multimodal, IT)    | 2.58 GB | 4 GB+   | HuggingFace |
+| `GEMMA_4_E4B_IT`       | Gemma 4 E4B (Higher Quality)    | 3.65 GB | 6 GB+   | HuggingFace |
+| `GEMMA_3N_E2B_IT_INT4` | Gemma 3n E2B (Int4, Multimodal) | ~1.3 GB | 4 GB+   | litert.dev  |
 
-> **Recommended:** Use `GEMMA_4_E2B_IT` for most use cases. It's multimodal (text + vision + audio) and downloads directly from HuggingFace without requiring an account.
+> **Recommended:** Use `GEMMA_4_E2B_IT` for most use cases — multimodal (text + vision + audio) and the best quality-to-size ratio.
 >
-> **iOS Note:** Models larger than ~2 GB (like Gemma 4) require the `com.apple.developer.kernel.extended-virtual-addressing` entitlement. See [iOS Entitlements](#ios-entitlements) below.
+> **iOS Note:** Models larger than ~2 GB require the `com.apple.developer.kernel.extended-virtual-addressing` entitlement. See [iOS Entitlements](#ios-entitlements) below. Gemma 3n E2B (~1.3 GB) works without it.
 
-**Other compatible models** (download manually from HuggingFace):
+**Other compatible models** (download `.litertlm` files manually from [HuggingFace](https://huggingface.co/litert-community)):
 
 | Model         | Size    | Min RAM | Notes                 |
 | ------------- | ------- | ------- | --------------------- |
