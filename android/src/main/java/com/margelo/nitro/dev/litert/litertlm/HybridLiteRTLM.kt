@@ -198,6 +198,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.systemPrompt?.let { systemPrompt = it }
                 }
     
+                // Whether to run engine validation after loading
+                val shouldValidate = config?.validate?: false
+    
                 try {
                     // Early GPU hardware check: probe for OpenCL library before
                     // spending time on engine creation. LiteRT-LM's GPU delegate
@@ -284,8 +287,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     Log.i(TAG, "Conversation created successfully")
 
                     // Validate the engine actually works with a quick test inference.
-                    // GPU backend can initialize without error but silently fail to produce tokens.
-                    validateEngine()
+                    // GPU/NPU backends can initialize without error but silently fail to
+                    // produce tokens — enabling this catches those failures at load time.
+                    // CPU is always reliable so validation is never run on it, even when
+                    // the `validate` flag is set.
+                    if (shouldValidate) {
+                        if (backend == Backend.GPU || backend == Backend.NPU) {
+                            validateEngine()
+                        } else {
+                            Log.i(TAG, "Validation skipped: CPU backend is always reliable")
+                        }
+                    }
     
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to load model: ${e.message}", e)
@@ -676,19 +688,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
     private fun cleanupInternal() {
         try {
+            conversation?.close()
             conversation = null
-            // Explicitly close engine if it supports it to free native memory immediately
-            // Assuming Engine implements AutoCloseable or has close()
-            if (engine is AutoCloseable) {
-                (engine as AutoCloseable).close()
-            } else {
-                 // Try reflection or just null it if no close method
-                try {
-                    engine?.javaClass?.getMethod("close")?.invoke(engine)
-                } catch (e: Exception) {
-                    // Method not found, rely on GC
-                }
-            }
+            engine?.close()        // Direct call
             engine = null 
         } catch (e: Exception) {
             Log.e(TAG, "Error closing resources", e)
@@ -721,26 +723,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         val convConfig = ConversationConfig(
             samplerConfig = SamplerConfig(
                 topK = topK,
-                topP = topP,
-                temperature = temperature,
-            )
+                topP = topP.toDouble(),
+                temperature = temperature.toDouble(),
+            ),
+            systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) }
         )
         conversation = engine!!.createConversation(convConfig)
-        // Apply system prompt/instruction if set
-        systemPrompt?.let { prompt ->
-            if (prompt.isNotEmpty()) {
-                try {
-                    // Send system instruction as the first turn to prime the conversation.
-                    // LiteRT-LM's Conversation API handles chat template formatting,
-                    // including Gemma's <start_of_turn>system block.
-                    val systemMsg = LiteRTMessage.system(prompt)
-                    conversation!!.sendMessage(message = systemMsg)
-                    Log.i(TAG, "System prompt applied (${prompt.length} chars)")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to apply system prompt: ${e.message}")
-                }
-            }
-        }
     }
 
     /**

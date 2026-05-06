@@ -68,6 +68,23 @@ export interface LLMConfig {
    * @default 0.95
    */
   topP?: number;
+
+  /**
+   * Whether to run engine validation after loading the model.
+   * When enabled, sends a quick test inference ("Hi") and waits up to 30s
+   * for a response to confirm the backend works. This is useful for GPU/NPU
+   * backends that may silently fail during inference (they can initialize
+   * without error but produce no tokens).
+   *
+   * Validation is **always a no-op on CPU** — the CPU backend is inherently
+   * reliable and never needs validation.
+   *
+   * Disabled by default because it adds significant latency (5-30s) to model loading.
+   * Enable only to catch GPU/NPU silent failure issues during development.
+   *
+   * @default false
+   */
+  validate?: boolean;
 }
 
 /**
