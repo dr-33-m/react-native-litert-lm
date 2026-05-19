@@ -108,8 +108,7 @@ async function main() {
 
     log(`Error: Could not download iOS frameworks: ${err.message}`);
     log('iOS builds will not work until frameworks are available.');
-    log('Run: ./scripts/download-ios-frameworks.sh to download manually,');
-    log('  or: ./scripts/build-ios-engine.sh to build from source.');
+    log('Run: ./scripts/download-ios-frameworks.sh to download manually.');
 
     // Fail fast on macOS so users discover the problem now, not at Xcode link time.
     // Skip SKIP_IOS_FRAMEWORK_DOWNLOAD is already checked above.

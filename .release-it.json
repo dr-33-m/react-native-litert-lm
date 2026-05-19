@@ -12,7 +12,6 @@
     "publish": true
   },
   "hooks": {
-    "before:init": "npm run build",
-    "after:bump": "scripts/build-ios-engine.sh"
+    "before:init": "npm run build"
   }
 }
