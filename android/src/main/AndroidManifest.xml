@@ -7,5 +7,10 @@
             android:authorities="${applicationId}.litertlm.init"
             android:exported="false"
             android:initOrder="100" />
+            
+        <!-- Allow dynamic loading of OpenCL for GPU delegate acceleration on Android 12+ -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
     </application>
 </manifest>

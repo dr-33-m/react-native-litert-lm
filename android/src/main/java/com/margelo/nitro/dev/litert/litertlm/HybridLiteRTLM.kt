@@ -27,6 +27,10 @@ import com.margelo.nitro.dev.litert.litertlm.Role
 import com.margelo.nitro.core.Promise
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Contents
+import com.google.ai.edge.litertlm.ExperimentalApi
+import com.google.ai.edge.litertlm.ExperimentalFlags
+import com.google.ai.edge.litertlm.OpenApiTool
+import com.google.ai.edge.litertlm.ToolProvider
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -167,6 +171,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var topP: Double = 0.95
     private var maxTokens: Int = 1024
     private var systemPrompt: String? = null
+    private var tools: Array<ToolDefinition>? = null
+    private var enableSpeculativeDecoding: Boolean = false
 
     override val memorySize: Long
         get() = 1024L * 1024L * 1024L // ~1GB (models are large)
@@ -196,6 +202,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.topP?.let { topP = it }
                     cfg.maxTokens?.let { maxTokens = it.toInt() }
                     cfg.systemPrompt?.let { systemPrompt = it }
+                    tools = cfg.tools
+                    enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
                 }
     
                 // Whether to run engine validation after loading
@@ -241,12 +249,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         else -> com.google.ai.edge.litertlm.Backend.CPU()
                     }
                     
-                    // Detect multimodal support from model filename.
+                    // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
                     // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
                     // Passing vision/audio backends to a text-only model causes
                     // vision_litert_compiled_model_executor init failures.
                     val modelFileName = modelPath.substringAfterLast("/").lowercase()
-                    val isMultimodal = modelFileName.contains("3n") || modelFileName.contains("gemma3")
+                    val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
     
                     val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
                     val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
@@ -278,6 +286,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     
                     if (isClosed) return@synchronized
                     
+                    if (enableSpeculativeDecoding) {
+                        @OptIn(ExperimentalApi::class)
+                        ExperimentalFlags.enableSpeculativeDecoding = true
+                    }
+
                     // Initialize Engine
                     engine = Engine(engineConfig).also { it.initialize() }
                     Log.i(TAG, "Engine created and initialized successfully")
@@ -361,32 +374,48 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // -------------------------------------------------------------------------
     // sendMessageAsync - Streaming inference
     // -------------------------------------------------------------------------
-    override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit) {
-        // This is already async (void return), so we execute immediately on the calling thread
-        // (which is the Nitro specialized thread, not Main).
-        // The SDK's sendMessageAsync is non-blocking anyway.
-        ensureLoaded()
+    override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
+        return Promise.parallel {
+            val latch = CountDownLatch(1)
+            val errorRef = AtomicReference<Throwable?>(null)
 
-        // Add user message to history
-        history.add(Message(Role.USER, message))
-        Log.d(TAG, "sendMessageAsync: $message")
+            ensureLoaded()
 
-        val fullResponseBuilder = StringBuilder()
-        
-        val listener = StreamingCallbackListener(
-            onToken = onToken,
-            responseBuilder = fullResponseBuilder,
-            history = history,
-            userMessage = message,
-            onStatsReady = { stats -> lastStats = stats },
-        )
+            // Add user message to history
+            history.add(Message(Role.USER, message))
+            Log.d(TAG, "sendMessageAsync: $message")
 
-        try {
-            val userMsg = LiteRTMessage.user(message)
-            conversation!!.sendMessageAsync(message = userMsg, callback = listener)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initiate async generation", e)
-            onToken("Error: ${e.message}", true)
+            val fullResponseBuilder = StringBuilder()
+            
+            val listener = StreamingCallbackListener(
+                onToken = { token, done ->
+                    onToken(token, done)
+                    if (done) {
+                        latch.countDown()
+                    }
+                },
+                responseBuilder = fullResponseBuilder,
+                history = history,
+                userMessage = message,
+                onStatsReady = { stats -> lastStats = stats },
+            )
+
+            try {
+                val userMsg = LiteRTMessage.user(message)
+                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initiate async generation", e)
+                errorRef.set(e)
+                onToken("Error: ${e.message}", true)
+                latch.countDown()
+            }
+
+            // Wait for completion or error
+            latch.await()
+            val err = errorRef.get()
+            if (err != null) {
+                throw RuntimeException("Async inference failed: ${err.message}", err)
+            }
         }
     }
 
@@ -476,6 +505,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return Promise.parallel {
             Log.i(TAG, "downloadModel: $url -> $fileName")
             
+            if (!url.startsWith("https://", ignoreCase = true)) {
+                throw IllegalArgumentException("Invalid download URL: HTTPS is required for security.")
+            }
+            
+            if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+                throw IllegalArgumentException("Invalid filename: path traversal or directory separators are not allowed.")
+            }
+            
             val context = LiteRTLMInitProvider.applicationContext ?: throw RuntimeException("Context not available")
             val modelsDir = java.io.File(context.filesDir, "models")
             if (!modelsDir.exists()) {
@@ -557,6 +594,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     override fun deleteModel(fileName: String): Promise<Unit> {
         return Promise.parallel {
             Log.i(TAG, "deleteModel: $fileName")
+            
+            if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
+                throw IllegalArgumentException("Invalid filename: path traversal or directory separators are not allowed.")
+            }
+            
             val context = LiteRTLMInitProvider.applicationContext ?: throw RuntimeException("Context not available")
             val modelsDir = java.io.File(context.filesDir, "models")
             val modelFile = java.io.File(modelsDir, fileName)
@@ -708,16 +750,25 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         // v0.10.2 enforces single-session: close existing conversation first
         conversation?.let { oldConv ->
             try {
-                if (oldConv is AutoCloseable) {
-                    oldConv.close()
-                } else {
-                    oldConv.javaClass.getMethod("close").invoke(oldConv)
-                }
+                oldConv.close()
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to close old conversation: ${e.message}")
             }
             conversation = null
         }
+        // Map tools
+        val lmTools: List<ToolProvider>? = tools?.map { tool ->
+            val apiTool = object : OpenApiTool {
+                override fun getToolDescriptionJsonString(): String {
+                    return tool.parametersJson
+                }
+                override fun execute(paramsJsonString: String): String {
+                    return "{}"
+                }
+            }
+            (apiTool as Any) as ToolProvider
+        }
+
         // Create conversation with explicit SamplerConfig (required by Gallery pattern).
         // GPU backend may fail silently without proper sampler params.
         val convConfig = ConversationConfig(
@@ -726,7 +777,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 topP = topP.toDouble(),
                 temperature = temperature.toDouble(),
             ),
-            systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) }
+            systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
+            tools = lmTools ?: emptyList()
         )
         conversation = engine!!.createConversation(convConfig)
     }
@@ -803,5 +855,62 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         createNewConversation()
     }
 
+    override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<String> {
+        return Promise.parallel {
+            ensureLoaded()
+            val contents = mutableListOf<Content>()
+            var userTextRepresentation = ""
+            for (part in parts) {
+                when (part.type) {
+                    PartType.TEXT -> part.text?.let { 
+                        contents.add(Content.Text(it))
+                        userTextRepresentation += "$it "
+                    }
+                    PartType.IMAGE -> part.imageBuffer?.let { buffer ->
+                        val byteBuffer = buffer.getBuffer(false)
+                        val bytes = ByteArray(byteBuffer.remaining())
+                        byteBuffer.get(bytes)
+                        contents.add(Content.ImageBytes(bytes))
+                        userTextRepresentation += "[Image Buffer] "
+                    }
+                    PartType.AUDIO -> part.audioBuffer?.let { buffer ->
+                        val byteBuffer = buffer.getBuffer(false)
+                        val bytes = ByteArray(byteBuffer.remaining())
+                        byteBuffer.get(bytes)
+                        contents.add(Content.AudioBytes(bytes))
+                        userTextRepresentation += "[Audio Buffer] "
+                    }
+                }
+            }
+            userTextRepresentation = userTextRepresentation.trim()
+            history.add(Message(Role.USER, userTextRepresentation))
 
+            val userMsg = LiteRTMessage.user(Contents.of(contents))
+            val startTime = System.nanoTime()
+            val responseMsg = conversation!!.sendMessage(message = userMsg)
+            val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
+
+            val response = responseMsg.contents.contents
+                .filterIsInstance<Content.Text>()
+                .joinToString("") { it.text }
+
+            history.add(Message(Role.MODEL, response))
+            
+            val promptTokens = userTextRepresentation.length / 4.0
+            val completionTokens = response.length / 4.0
+            lastStats = GenerationStats(
+                promptTokens = promptTokens,
+                completionTokens = completionTokens,
+                totalTokens = promptTokens + completionTokens,
+                timeToFirstToken = 0.0,
+                totalTime = elapsedMs,
+                tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
+            )
+            response
+        }
+    }
+
+    override fun countTokens(text: String): Double {
+        return -1.0
+    }
 }

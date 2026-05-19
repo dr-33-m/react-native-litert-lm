@@ -32,6 +32,7 @@ import {
 
 // ─── Asset helpers ───────────────────────────────────────────────────────────
 const TEST_IMAGE_ASSET = require("./test.jpeg");
+const TEST_AUDIO_ASSET = require("./test.wav");
 
 async function getTestImagePath(inst?: any): Promise<string> {
   if (Platform.OS === "android") return "/data/local/tmp/test.jpeg";
@@ -102,6 +103,9 @@ function Main() {
   const [busy, setBusy] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [liveMemory, setLiveMemory] = useState<MemoryUsage | null>(null);
+  const [enableSpeculativeDecoding, setEnableSpeculativeDecoding] = useState(false);
+  const [enableTools, setEnableTools] = useState(false);
+  const [attachment, setAttachment] = useState<"image" | "audio" | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
   const config = useMemo(
@@ -112,8 +116,25 @@ function Main() {
       autoLoad: false,
       enableMemoryTracking: true,
       maxMemorySnapshots: 100,
+      enableSpeculativeDecoding,
+      tools: enableTools
+        ? [
+            {
+              name: "get_current_weather",
+              description: "Get the current weather for a location",
+              parametersJson: JSON.stringify({
+                type: "object",
+                properties: {
+                  location: { type: "string", description: "The city and state, e.g. San Francisco, CA" },
+                  unit: { type: "string", enum: ["celsius", "fahrenheit"] }
+                },
+                required: ["location"]
+              })
+            }
+          ]
+        : undefined,
     }),
-    [backend],
+    [backend, enableSpeculativeDecoding, enableTools],
   );
 
   const {
@@ -133,30 +154,67 @@ function Main() {
 
   // ── Send message ──────────────────────────────────────────────────────────
   const send = useCallback(async () => {
-    if (!model || !input.trim() || busy) return;
+    if (!model || busy) return;
     const msg = input.trim();
+    if (!msg && !attachment) return;
+
     setInput("");
     setBusy(true);
-    setChat((prev) => [...prev, { role: "user", text: msg, ts: Date.now() }]);
+    const currentAttachment = attachment;
+    setAttachment(null);
+
+    let displayMsg = msg;
+    if (currentAttachment) {
+      displayMsg = `[Sent with ${currentAttachment}] ${msg}`;
+    }
+    setChat((prev) => [...prev, { role: "user", text: displayMsg, ts: Date.now() }]);
     setStreaming("");
 
     try {
-      await new Promise<void>((resolve) => {
-        let full = "";
-        model.sendMessageAsync(msg, (token: string, done: boolean) => {
-          if (!done) {
-            full += token;
-            setStreaming(full);
-          } else {
-            setChat((prev) => [
-              ...prev,
-              { role: "model", text: full, ts: Date.now() },
-            ]);
-            setStreaming("");
-            resolve();
-          }
+      if (currentAttachment) {
+        setStreaming("Reading attachment and generating response...");
+        const parts: any[] = [];
+        
+        if (currentAttachment === "image") {
+          const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
+          const response = await fetch(uri);
+          const buffer = await response.arrayBuffer();
+          parts.push({ type: "image", imageBuffer: buffer });
+        } else if (currentAttachment === "audio") {
+          const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
+          const response = await fetch(uri);
+          const buffer = await response.arrayBuffer();
+          parts.push({ type: "audio", audioBuffer: buffer });
+        }
+        
+        if (msg) {
+          parts.push({ type: "text", text: msg });
+        }
+
+        const reply = await model.sendMultimodalMessage(parts);
+        setChat((prev) => [
+          ...prev,
+          { role: "model", text: reply, ts: Date.now() },
+        ]);
+        setStreaming("");
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          let full = "";
+          model.sendMessageAsync(msg, (token: string, done: boolean) => {
+            if (!done) {
+              full += token;
+              setStreaming(full);
+            } else {
+              setChat((prev) => [
+                ...prev,
+                { role: "model", text: full, ts: Date.now() },
+              ]);
+              setStreaming("");
+              resolve();
+            }
+          }).catch(reject);
         });
-      });
+      }
       // Refresh memory stats
       try {
         setLiveMemory(model.getMemoryUsage());
@@ -166,10 +224,11 @@ function Main() {
         ...prev,
         { role: "model", text: `Error: ${e.message}`, ts: Date.now() },
       ]);
+      setStreaming("");
     } finally {
       setBusy(false);
     }
-  }, [model, input, busy]);
+  }, [model, input, attachment, busy]);
 
   // ── Stats ─────────────────────────────────────────────────────────────────
   const stats = model && isReady ? model.getStats() : null;
@@ -261,6 +320,39 @@ function Main() {
             {gpuWarning ? (
               <Text style={s.backendWarning}>{gpuWarning}</Text>
             ) : null}
+
+            <Text style={[s.drawerTitle, { marginTop: 14 }]}>Features (v0.12.0)</Text>
+            <View style={s.pillRow}>
+              <TouchableOpacity
+                disabled={!canInteract}
+                onPress={() => setEnableSpeculativeDecoding(!enableSpeculativeDecoding)}
+                style={[
+                  s.pill,
+                  enableSpeculativeDecoding && s.pillActive,
+                  !canInteract && { opacity: 0.5 },
+                ]}
+              >
+                <Text style={[s.pillText, enableSpeculativeDecoding && s.pillTextActive]}>
+                  Speculative
+                </Text>
+                <Text style={s.pillSub}>Multi-token</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                disabled={!canInteract}
+                onPress={() => setEnableTools(!enableTools)}
+                style={[
+                  s.pill,
+                  enableTools && s.pillActive,
+                  !canInteract && { opacity: 0.5 },
+                ]}
+              >
+                <Text style={[s.pillText, enableTools && s.pillTextActive]}>
+                  Tools
+                </Text>
+                <Text style={s.pillSub}>Function calling</Text>
+              </TouchableOpacity>
+            </View>
 
             {memorySummary && memorySummary.snapshotCount > 0 && (
               <>
@@ -440,29 +532,63 @@ function Main() {
 
         {/* ── Input bar ──────────────────────────────────────────────────── */}
         {isReady && (
-          <View style={s.inputBar}>
-            <TextInput
-              style={s.input}
-              placeholder="Message…"
-              placeholderTextColor={T.dim}
-              value={input}
-              onChangeText={setInput}
-              editable={!busy}
-              onSubmitEditing={send}
-              returnKeyType="send"
-              multiline
-            />
-            <TouchableOpacity
-              style={[s.sendBtn, (!input.trim() || busy) && { opacity: 0.4 }]}
-              onPress={send}
-              disabled={!input.trim() || busy}
-            >
-              {busy ? (
-                <ActivityIndicator color="#fff" size="small" />
-              ) : (
-                <Text style={s.sendIcon}>↑</Text>
-              )}
-            </TouchableOpacity>
+          <View style={{ backgroundColor: T.bg }}>
+            {attachment && (
+              <View style={s.attachmentPreview}>
+                <Text style={s.attachmentPreviewText}>
+                  📎 Attached: {attachment === "image" ? "test.jpeg" : "test.wav"}
+                </Text>
+                <TouchableOpacity onPress={() => setAttachment(null)} style={s.removeAttachmentBtn}>
+                  <Text style={s.removeAttachmentText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            
+            <View style={s.inputBar}>
+              <TouchableOpacity
+                style={s.attachBtn}
+                onPress={() => {
+                  const warning = checkMultimodalSupport();
+                  if (warning) {
+                    alert(`Multimodal feature warning:\n\n${warning}`);
+                    return;
+                  }
+                  if (attachment === null) {
+                    setAttachment("image");
+                  } else if (attachment === "image") {
+                    setAttachment("audio");
+                  } else {
+                    setAttachment(null);
+                  }
+                }}
+                disabled={busy}
+              >
+                <Text style={s.attachIcon}>📎</Text>
+              </TouchableOpacity>
+              
+              <TextInput
+                style={s.input}
+                placeholder={attachment ? "Add message with attachment..." : "Message…"}
+                placeholderTextColor={T.dim}
+                value={input}
+                onChangeText={setInput}
+                editable={!busy}
+                onSubmitEditing={send}
+                returnKeyType="send"
+                multiline
+              />
+              <TouchableOpacity
+                style={[s.sendBtn, (!input.trim() && !attachment || busy) && { opacity: 0.4 }]}
+                onPress={send}
+                disabled={(!input.trim() && !attachment) || busy}
+              >
+                {busy ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={s.sendIcon}>↑</Text>
+                )}
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       </KeyboardAvoidingView>
@@ -845,4 +971,43 @@ const s = StyleSheet.create({
     justifyContent: "center",
   },
   sendIcon: { color: "#fff", fontSize: 20, fontWeight: "900" },
+
+  // Attachments
+  attachmentPreview: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(99,102,241,0.12)",
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: T.border,
+  },
+  attachmentPreviewText: {
+    color: T.accentGlow,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  removeAttachmentBtn: {
+    padding: 4,
+  },
+  removeAttachmentText: {
+    color: T.dim,
+    fontSize: 14,
+    fontWeight: "bold",
+  },
+  attachBtn: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: T.card,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: T.border,
+  },
+  attachIcon: {
+    fontSize: 18,
+    color: T.text,
+  },
 });

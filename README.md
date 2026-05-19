@@ -4,16 +4,15 @@ High-performance on-device LLM inference for React Native, powered by [LiteRT-LM
 
 ## Features
 
-- 🚀 **Native Performance** — Kotlin (Android) / C++ (iOS) via Nitro Modules JSI bindings
-- 🧠 **Gemma 4 Ready** — First-class support for Gemma 4 E2B/E4B multimodal models (text + vision + audio)
-- ⚡ **GPU Acceleration** — Metal (iOS), OpenCL GPU delegate (Android, Pixel devices)
-- 🔄 **Streaming Support** — Token-by-token generation callbacks
-- 📱 **Cross-Platform** — Android API 26+ / iOS 15.0+
-- 🖼️ **Multimodal** — Image and audio input support
-- 🧵 **Async API** — Non-blocking inference on dedicated large-stack threads
-- 📊 **Real Memory Tracking** — OS-level memory metrics (RSS, native heap, available memory) via native APIs
-- 🧮 **Zero-Copy Buffers** — Memory snapshots stored in native ArrayBuffers via Nitro Modules
-- 📥 **Automatic Model Download** — Downloads models from URL with progress tracking and local caching
+- 🚀 **Native Swift Bridge (iOS)** — Bypasses Swift actor deadlocks (User Rule #1) via direct C FFI dispatched on a serial `dev.litert.engine` background queue.
+- 🤖 **Stateless Kotlin Bridge (Android)** — Fully conforms to `HybridLiteRTLMSpec` using direct JSI memory access.
+- ⚡ **Zero-Copy Multimodal API** — Native-owned `ArrayBuffer` mapping straight to FFI inputs for image/audio data without copy overhead (complying with User Rule #2).
+- 🧠 **Speculative Decoding** — Active multi-token prediction support with pre-flight model capability validation.
+- 🛠️ **Function / Tool Calling** — Native JSON-encoded schema specification support for structured outputs.
+- 🏎️ **GPU Acceleration** — Metal (iOS), OpenCL GPU delegate (Android, Pixel devices).
+- 🔄 **Streaming Support** — Non-blocking token-by-token callbacks.
+- 📊 **Real Memory Tracking** — OS-level memory metrics (RSS, native heap, available memory) via native APIs (complying with User Rule #3).
+- 📥 **Automatic Model Download** — Downloads models from URL with progress tracking and local caching.
 
 ## Demo
 
@@ -71,7 +70,8 @@ The `example/` directory contains a fully functional test app with a dark-themed
 - Multi-turn conversation with context retention
 - Performance benchmarking (tokens/sec, latency)
 - Real-time memory tracking
-- Quick chat interface
+- Speculative decoding & tool calling settings toggles
+- Zero-copy multimodal inference loading images/audio directly into ArrayBuffers
 
 ### Running the Example
 
@@ -93,10 +93,10 @@ The `example/` directory contains a fully functional test app with a dark-themed
    ```bash
    npx expo prebuild --clean
    npx expo run:android  # Android
-   npx expo run:ios      # iOS (requires XCFramework — see "Building the iOS Engine" below)
+   npx expo run:ios      # iOS (pre-linked with CLiteRTLM.xcframework)
    ```
 
-> **Note:** If you change native code (C++/Kotlin/Obj-C++), you must run `npx expo prebuild --clean` again before rebuilding.
+> **Note:** If you change native code (Swift/Kotlin), you must run `npx expo prebuild --clean` again before rebuilding.
 
 ## Model Management
 
@@ -203,30 +203,78 @@ llm.sendMessageAsync("Tell me a story", (token, done) => {
 });
 ```
 
-### Multimodal (Image / Audio)
+### Multimodal (Image / Audio) & Zero-Copy Buffers
 
-> **Note**: Multimodal is fully supported on Android. iOS has the code paths implemented but vision/audio executors may not be available in the current XCFramework build — use `checkMultimodalSupport()` to verify at runtime.
+Multimodal features are fully supported via standard file paths or high-performance zero-copy `ArrayBuffer` objects:
+
+#### 1. Zero-Copy Multimodal Messages (Recommended)
+This API uses Nitro Modules' native-backed `ArrayBuffer` directly mapped to native memory buffers, avoiding any base64 heap copying overhead (User Rule #2):
 
 ```typescript
 import { checkMultimodalSupport } from "react-native-litert-lm";
 
 const warning = checkMultimodalSupport();
 if (warning) {
-  console.warn(warning); // Experimental on iOS
+  console.warn(warning); // Experimental or unsupported on current platform (e.g. iOS simulator)
 } else {
-  // Image input (for vision models like Gemma 4)
-  // Images >1024px are automatically resized to prevent OOM
-  const response = await llm.sendMessageWithImage(
-    "What's in this image?",
-    "/path/to/image.jpg",
-  );
+  // Read local assets or files straight into ArrayBuffers using fetch
+  const response = await fetch(Image.resolveAssetSource(require("./test.jpeg")).uri);
+  const imageBuffer = await response.arrayBuffer();
 
-  // Audio input
-  const transcription = await llm.sendMessageWithAudio(
-    "Transcribe this audio",
-    "/path/to/audio.wav",
-  );
+  const reply = await llm.sendMultimodalMessage([
+    { type: "image", imageBuffer },
+    { type: "text", text: "Describe what is in this image." }
+  ]);
+  console.log(reply);
 }
+```
+
+#### 2. Path-Based Multimodal Messages
+```typescript
+// Image input
+const response = await llm.sendMessageWithImage(
+  "What's in this image?",
+  "/path/to/image.jpg",
+);
+
+// Audio input
+const transcription = await llm.sendMessageWithAudio(
+  "Transcribe this audio",
+  "/path/to/audio.wav",
+);
+```
+
+### Speculative Decoding & Tools
+
+#### 1. Speculative Decoding (MTP)
+Enable speculative decoding in `LLMConfig` to accelerate inference using multi-token prediction when supported by your model:
+
+```typescript
+const { model } = useModel(GEMMA_4_E2B_IT, {
+  enableSpeculativeDecoding: true,
+});
+```
+
+#### 2. Function / Tool Calling
+Inject tools as an array of definitions, specifying parameter validation using standard JSON schema format:
+
+```typescript
+const { model } = useModel(GEMMA_4_E2B_IT, {
+  tools: [
+    {
+      name: "get_current_weather",
+      description: "Get the current weather for a location",
+      parametersJson: JSON.stringify({
+        type: "object",
+        properties: {
+          location: { type: "string", description: "The city and state, e.g. San Francisco, CA" },
+          unit: { type: "string", enum: ["celsius", "fahrenheit"] }
+        },
+        required: ["location"]
+      })
+    }
+  ]
+});
 ```
 
 ### Performance Stats
@@ -237,6 +285,8 @@ console.log(`Generated ${stats.completionTokens} tokens`);
 console.log(`Speed: ${stats.tokensPerSecond.toFixed(1)} tokens/sec`);
 console.log(`Time to first token: ${stats.timeToFirstToken.toFixed(0)} ms`);
 ```
+
+> **Note**: Stats are available for both sync (`sendMessage`) and streaming (`sendMessageAsync`) on both platforms. iOS uses real benchmark data from the C API; Android uses heuristic token counts with precise timing.
 
 ### Memory Tracking
 
@@ -391,31 +441,9 @@ Send a message with audio (for audio-capable models like Gemma 4 E2B).
 
 Returns performance metrics from the last inference call.
 
-```typescript
-interface GenerationStats {
-  tokensPerSecond: number;
-  totalTime: number; // milliseconds
-  timeToFirstToken: number; // milliseconds
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-}
-```
-
-> **Note**: Stats are available for both sync (`sendMessage`) and streaming (`sendMessageAsync`) on both platforms. iOS uses real benchmark data from the C API; Android uses heuristic token counts (~4 chars/token) with precise timing.
-
 ### `getMemoryUsage(): MemoryUsage`
 
 Returns real OS-level memory usage.
-
-```typescript
-interface MemoryUsage {
-  nativeHeapBytes: number;
-  residentBytes: number;
-  availableMemoryBytes: number;
-  isLowMemory: boolean;
-}
-```
 
 ### `getHistory(): Message[]`
 
@@ -440,17 +468,10 @@ import {
   checkBackendSupport,
   checkMultimodalSupport,
   getRecommendedBackend,
-  applyGemmaTemplate,
-  applyPhiTemplate,
-  applyLlamaTemplate,
 } from "react-native-litert-lm";
 
 // Check if GPU is supported on this device
 const gpuWarning = checkBackendSupport("gpu");
-if (gpuWarning) {
-  console.warn(gpuWarning);
-  // "GPU backend requires OpenCL support, which is unavailable on most Samsung and Qualcomm devices."
-}
 
 // Check NPU support
 const npuWarning = checkBackendSupport("npu"); // string | undefined
@@ -460,12 +481,6 @@ const mmError = checkMultimodalSupport(); // string | undefined
 
 // Get recommended backend
 const backend = getRecommendedBackend(); // 'cpu'
-
-// Manual prompt formatting (advanced)
-const prompt = applyGemmaTemplate(
-  [{ role: "user", content: "Hello!" }],
-  "You are helpful.",
-);
 ```
 
 ## Requirements
@@ -476,7 +491,7 @@ const prompt = applyGemmaTemplate(
 | react-native-nitro-modules | 0.35.0+       |
 | Android API                | 26+ (ARM64)   |
 | iOS                        | 15.0+ (ARM64) |
-| LiteRT-LM Engine           | 0.10.2        |
+| LiteRT-LM Engine           | 0.12.0        |
 
 ## Platform Support
 
@@ -487,18 +502,18 @@ const prompt = applyGemmaTemplate(
 
 ### iOS Feature Matrix
 
-| Feature                      | Status | Notes                                                 |
-| ---------------------------- | ------ | ----------------------------------------------------- |
-| Text inference (blocking)    | ✅     | Via LiteRT-LM C API                                   |
-| Text inference (streaming)   | ✅     | Token-by-token callbacks                              |
-| CPU inference                | ✅     | Recommended default backend                           |
-| GPU inference (Metal/MPS)    | ✅     | Supported via `backend: 'gpu'`                        |
-| Model download with progress | ✅     | NSURLSession, cached in `Caches/`                     |
-| Memory tracking              | ✅     | `mach_task_basic_info`                                |
-| Multi-turn conversation      | ✅     | Context retained across turns                         |
-| Multimodal (image/audio)     | 🧪     | Code paths exist; vision/audio executors experimental |
-| Constrained decoding         | ❌     | Requires llguidance Rust runtime                      |
-| Function calling             | ❌     | Requires Rust CXX bridge runtime                      |
+| Feature                      | Status | Notes                                                  |
+| ---------------------------- | ------ | ------------------------------------------------------ |
+| Text inference (blocking)    | ✅     | Direct FFI using `dev.litert.engine` background queue  |
+| Text inference (streaming)   | ✅     | Token-by-token callbacks                               |
+| CPU inference                | ✅     | Safe fallback default                                  |
+| GPU inference (Metal/MPS)    | ✅     | Supported via `backend: 'gpu'`                         |
+| Model download with progress | ✅     | URLSession-based, cached in `Caches/`                  |
+| Memory tracking              | ✅     | Real-time Resident Set Size (RSS) tracking             |
+| Multi-turn conversation      | ✅     | Context retained across turns                          |
+| Multimodal (image/audio)     | ✅     | Zero-copy `ArrayBuffer` mapping to FFI input buffers   |
+| Speculative Decoding         | ✅     | Dynamic capabilities check during model pre-load       |
+| Function / Tool Calling      | ✅     | Supported via JSON-encoded schema specification        |
 
 ### iOS Entitlements
 
@@ -513,85 +528,88 @@ Add to your app's `.entitlements` file:
 
 > **Note:** This entitlement requires a **paid Apple Developer account** ($99/year). Gemma 3n E2B (~1.3 GB) works without it.
 
-## Building the iOS Engine
+## iOS FFI Architecture & Integration
 
-The iOS build uses a **Bazel-to-XCFramework pipeline** that compiles the LiteRT-LM C engine and all transitive dependencies into a static library (~82–84 MB).
+The library uses a highly optimized Swift Direct-FFI bridge that links directly with the pre-compiled C library `CLiteRTLM.xcframework`.
 
-### Prerequisites
+### Key Design Commitments
 
-- **Bazel 7.6.1+** (via [Bazelisk](https://github.com/bazelbuild/bazelisk) recommended)
-- **Xcode command line tools** (`xcode-select --install`)
+1. **JSI Thread Safety (User Rule #1)**:
+   - The JSI/JS thread must never be blocked by native synchronous lock-waiting operations.
+   - We dispatch all FFI calls to a serial background `dev.litert.engine` queue, executing callbacks asynchronously to prevent deadlocking JSI execution.
 
-### Build
+2. **Zero-Copy Memory Pipelines (User Rule #2)**:
+   - Enforce the use of Nitro Modules' `ArrayBuffer` directly referencing native memory pointers (`ArrayBuffer.data`) when processing heavy media assets like images or audio.
 
-```bash
-./scripts/build-ios-engine.sh
-```
+3. **Manual FFI Resource Management (User Rule #3)**:
+   - Raw pointers (`LiteRtLmEngine*`, `LiteRtLmConversation*`) are manually allocated and strictly deallocated inside Swift `deinit` and `close()` destructors to guarantee 0% memory leaks during prolonged inference sessions.
 
-This will:
-
-1. Clone/checkout LiteRT-LM `v0.10.2` source into `.litert-lm-build/`
-2. Apply `scripts/patches/ios-engine-fixes.patch` (PromptTemplate simplification, linker fixes)
-3. Build `//c:engine` for `ios_arm64` and `ios_sim_arm64` via Bazel
-4. Collect all transitive `.o` files (engine, protobuf, re2, sentencepiece, etc.)
-5. Compile C/C++ stubs for unavailable Rust dependencies
-6. Merge ~1,909 object files into a static library via `libtool`
-7. Package into `ios/Frameworks/LiteRTLM.xcframework`
-
-### Output
+### Architecture Topology
 
 ```
-ios/Frameworks/LiteRTLM.xcframework/
-├── Info.plist
-├── ios-arm64/LiteRTLM.framework/              # Device
-│   ├── LiteRTLM                                # ~82 MB static library
-│   └── Headers/litert_lm_engine.h
-└── ios-arm64-simulator/LiteRTLM.framework/    # Simulator
-    ├── LiteRTLM                                # ~84 MB static library
-    └── Headers/litert_lm_engine.h
+┌──────────────────────────────────────────────────────────┐
+│  React Native (TypeScript / JavaScript)                  │
+├──────────────────────────────────────────────────────────┤
+│  Nitro Modules JSI Bindings (`HybridLiteRTLMSpec`)       │
+├─────────────────────────────┬────────────────────────────┤
+│  Android (Kotlin)           │  iOS (Swift Direct FFI)    │
+│  `HybridLiteRTLM.kt`        │  `HybridLiteRTLM.swift`    │
+│  `litertlm-android` AAR     │  `CLiteRTLM.xcframework`   │
+└─────────────────────────────┴────────────────────────────┘
 ```
 
-### FFI Stubs
+#### Android Bridging
+- Conforms fully to `HybridLiteRTLMSpec` using Kotlin.
+- Incorporates Proguard keep rules to prevent dynamic JSI/JNI code stripping.
+- Declares `<uses-native-library android:name="libOpenCL.so" android:required="false" />` to load dynamic OpenCL for GPU delegate acceleration on Android 12+ without throwing platform installer exceptions.
 
-Certain LiteRT-LM features depend on Rust libraries (llguidance, CXX bridge, MinijinjaTemplate) that are not available in the iOS Bazel build. These are replaced with stubs:
+#### iOS Bridging
+- Entirely written in native Swift (`HybridLiteRTLM.swift`) calling direct FFI.
+- Avoids the upstream Swift SDK `actor` lock-blocking deadlocks by utilizing low-level C functions directly.
+- Implements custom `getMemoryUsage` that queries the OS directly via `mach_task_basic_info` to get precise real-time Resident Set Size (RSS) metrics.
 
-| Stub File                            | Location         | Purpose                                  |
-| ------------------------------------ | ---------------- | ---------------------------------------- |
-| `cxx_bridge_stubs.cc`                | `scripts/stubs/` | CXX bridge runtime + Rust FFI type stubs |
-| `llguidance_stubs.c`                 | `scripts/stubs/` | llguidance constrained decoding C API    |
-| `gemma_model_constraint_provider.cc` | `scripts/stubs/` | Gemma constraint provider factory        |
+## Testing
 
-Additionally, `PromptTemplate` is patched at build time to use a simplified C++ template formatter instead of the Rust MinijinjaTemplate, which avoids all Rust FFI calls during conversation setup.
+The library includes a comprehensive multi-tier unit testing suite designed to run quickly on host machines (CI runners or local development environments) without requiring a physical test device.
 
-> **Text inference works fully without these Rust components.** Only constrained decoding, function calling parsers, and advanced Jinja2 template features are affected.
+### 1. JavaScript / TypeScript Layer (Jest)
 
-## Architecture
+The JS/TS layer uses Jest to validate the `useModel` hook, download progress callbacks, URL query scrubbing, file storage helpers, and the zero-copy native memory tracker buffer allocations.
 
-```
-┌─────────────────────────────────────────────────┐
-│  React Native (TypeScript)                      │
-│  useModel() / createLLM() / sendMessage()       │
-├─────────────────────────────────────────────────┤
-│  Nitro Modules JSI Bridge                       │
-├──────────────────────┬──────────────────────────┤
-│  Android (Kotlin)    │  iOS (C++)               │
-│  HybridLiteRTLM.kt   │  HybridLiteRTLM.cpp      │
-│  litertlm-android    │  LiteRT-LM C API         │
-│  AAR (GPU delegate)  │  XCFramework (Metal)     │
-└──────────────────────┴──────────────────────────┘
-```
+* **Setup & Mocking**: Includes an active stub (`src/__mocks__/react-native-nitro-modules.ts`) that mocks the Nitro Modules `HybridObject` architecture.
+* **How to run**:
+  ```bash
+  npm run test
+  ```
 
-- **Android**: Kotlin (`HybridLiteRTLM.kt`) interfacing with the `litertlm-android` AAR via the **Kotlin SDK**. The SDK handles control token stripping and turn management automatically. Engine validation probes for OpenCL availability before GPU initialization. `ConversationConfig` with `SamplerConfig` is passed for all conversations (matching the Gallery app pattern).
-- **iOS**: C++ (`HybridLiteRTLM.cpp`) interfacing with the LiteRT-LM **C API** via a prebuilt `LiteRTLM.xcframework`. Unlike the Kotlin SDK, the C API emits raw tokens including control sequences (`<end_of_turn>`, `<start_of_turn>`) and echoed user messages. The C++ layer implements a robust sanitization pipeline:
-  - **Accumulation-and-diff** — buffers the full response and emits only new deltas
-  - **`stripControlTokens()`** — removes all control sequences from the accumulated buffer
-  - **`safeEmitLength()`** — look-ahead buffering that withholds partial control tokens (e.g., `<end_of_tur`) from emission until the full token is received or the stream terminates
-  - **Echo mitigation** — strips echoed user messages from the raw stream
-  - **Final flush** — mandatory clean-and-flush step on stream termination
+### 2. Android Kotlin Layer (Robolectric)
 
-  Platform-specific code (model downloading, file management) is in Objective-C++ (`ios/IOSDownloadHelper.mm`).
+The Android layer uses local JUnit Robolectric tests to run Android code on the JVM, sandboxing OS dependencies. It validates HTTPS schema constraints, path traversal mitigations, and initial telemetry states.
 
-> **For contributors**: Changes to `cpp/HybridLiteRTLM.cpp` do not affect Android. Feature changes must be applied to both the Kotlin and C++ implementations.
+* **Setup & Mocking**: Uses a local shadow `Promise` implementation to test thread-asynchronous errors.
+* **How to run**:
+  ```bash
+  cd example/android
+  ./gradlew :react-native-litert-lm:testDebugUnitTest
+  ```
+
+### 3. iOS Swift Layer (XCTest)
+
+The iOS layer leverages native XCTests integrated directly into CocoaPods via standard development test specs. It verifies FFI path traversal blocking, non-HTTPS download blocks, automatic `deinit` cleanup, and Mach-based telemetry bounds.
+
+* **How to run**:
+  1. Boot your preferred iOS simulator (e.g., iPhone 16 running iOS 18.6).
+  2. Run the tests using `xcodebuild`:
+     ```bash
+     cd example/ios
+     xcodebuild test -workspace LLMTest.xcworkspace -scheme react-native-litert-lm-Unit-Tests -sdk iphonesimulator -destination 'platform=iOS Simulator,name=iPhone 16'
+     ```
+
+### Security & Sanitization Protections Checked
+Every test run automatically asserts:
+- **Defense in depth for download boundaries**: Blocks non-HTTPS schemes at both JS model factory and low-level native layers.
+- **Path Traversal protections**: Prevents directory traversal attacks (`..`, `/`, `\`) in download and deletion APIs.
+- **Telemetry sanity**: Ensures zero-leak memory usage telemetry boundaries stay strictly linear.
 
 ## License
 

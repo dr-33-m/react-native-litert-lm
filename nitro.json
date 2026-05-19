@@ -3,7 +3,7 @@
   "cxxNamespace": ["litertlm"],
   "ios": {
     "iosModuleName": "LiteRTLM",
-    "language": "c++"
+    "language": "swift"
   },
   "android": {
     "androidNamespace": ["dev", "litert", "litertlm"],
@@ -12,7 +12,7 @@
   },
   "autolinking": {
     "LiteRTLM": {
-      "ios": { "language": "c++", "implementationClassName": "HybridLiteRTLM" },
+      "ios": { "language": "swift", "implementationClassName": "HybridLiteRTLM" },
       "android": { "language": "kotlin", "implementationClassName": "HybridLiteRTLM" }
     }
   },

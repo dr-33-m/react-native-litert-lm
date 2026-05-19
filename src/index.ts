@@ -20,13 +20,6 @@ export type {
   MemoryUsage,
 } from "./specs/LiteRTLM.nitro";
 
-// Re-export template utilities
-export type { ChatMessage } from "./templates";
-export {
-  applyGemmaTemplate,
-  applyPhiTemplate,
-  applyLlamaTemplate,
-} from "./templates";
 
 // Re-export memory tracking utilities (uses NitroModules.createNativeArrayBuffer v0.35+)
 export type {

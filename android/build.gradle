@@ -19,6 +19,7 @@ android {
     
     defaultConfig {
         minSdk 26  // LiteRT-LM requires API 26+
+        consumerProguardFiles 'consumer-rules.pro'
         
         externalNativeBuild {
             cmake {
@@ -66,6 +67,12 @@ android {
             keepDebugSymbols.add("**/*.so")
         }
     }
+    
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
 }
 
 repositories {
@@ -89,4 +96,9 @@ dependencies {
     
     // LiteRT-LM Kotlin API
     implementation "com.google.ai.edge.litertlm:litertlm-android:${litertLmVersion}"
+    
+    // Testing Dependencies
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.11.1'
+    testImplementation 'org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3'
 }

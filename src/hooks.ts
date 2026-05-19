@@ -174,7 +174,7 @@ export function useModel(
                   resolve(fullResponse);
                 }
               },
-            );
+            ).catch(reject);
           } catch (e: any) {
             reject(e);
           }

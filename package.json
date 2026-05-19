@@ -1,10 +1,10 @@
 {
   "name": "react-native-litert-lm",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "litertLm": {
-    "version": "0.10.2",
-    "androidMavenVersion": "0.10.2",
-    "iosGitTag": "v0.10.2"
+    "version": "0.12.0",
+    "androidMavenVersion": "0.12.0",
+    "iosGitTag": "v0.12.0"
   },
   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",
   "license": "MIT",
@@ -43,14 +43,13 @@
     "android/src",
     "android/build.gradle",
     "android/CMakeLists.txt",
-    "ios/*.mm",
-    "ios/*.m",
+    "ios/**/*.swift",
+    "ios/**/*.mm",
+    "ios/**/*.m",
     "cpp",
     "nitrogen/generated",
     "scripts/postinstall.js",
     "scripts/download-ios-frameworks.sh",
-    "scripts/build-ios-engine.sh",
-    "scripts/stubs",
     "react-native.config.js",
     "react-native-litert-lm.podspec",
     "app.plugin.js",
@@ -64,6 +63,7 @@
     "postinstall": "node scripts/postinstall.js",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
+    "test": "jest",
     "lint": "eslint \"**/*.{js,ts,tsx}\" --fix",
     "prepack": "npm run build",
     "specs": "npx nitrogen",
@@ -76,9 +76,17 @@
   },
   "devDependencies": {
     "@expo/config-plugins": "~55.0.0",
+    "@types/jest": "^30.0.0",
     "@types/react": "~19.2.10",
+    "@types/react-test-renderer": "^19.1.0",
+    "jest": "^30.4.2",
+    "react": "^19.2.6",
+    "react-native": "^0.85.3",
     "react-native-nitro-modules": "^0.35.4",
+    "react-test-renderer": "^19.2.6",
     "release-it": "^19.2.4",
+    "ts-jest": "^29.4.10",
+    "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {

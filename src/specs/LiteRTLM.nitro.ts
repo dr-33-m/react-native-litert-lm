@@ -18,6 +18,37 @@ export type Backend = "cpu" | "gpu" | "npu";
 export type Role = "user" | "model" | "system";
 
 /**
+ * Definition for a function/tool that the model can request to execute.
+ */
+export interface ToolDefinition {
+  /** Name of the function/tool */
+  name: string;
+  /** Human-readable description of what the function/tool does */
+  description: string;
+  /** JSON schema defining parameter names and types (stringified) */
+  parametersJson: string;
+}
+
+/**
+ * The part type for a multimodal message content part.
+ */
+export type PartType = "text" | "image" | "audio";
+
+/**
+ * A part of a unified multimodal message payload.
+ */
+export interface MultimodalPart {
+  /** The part type: 'text', 'image', or 'audio' */
+  type: PartType;
+  /** The plain text content, if type is 'text' */
+  text?: string;
+  /** Raw image binary data, if type is 'image' (zero-copy ArrayBuffer mapping) */
+  imageBuffer?: ArrayBuffer;
+  /** Raw audio binary data, if type is 'audio' (zero-copy ArrayBuffer mapping) */
+  audioBuffer?: ArrayBuffer;
+}
+
+/**
  * Configuration options for loading an LLM.
  */
 export interface LLMConfig {
@@ -85,6 +116,24 @@ export interface LLMConfig {
    * @default false
    */
   validate?: boolean;
+
+  /**
+   * Whether this is a multimodal model.
+   * When enabled, the engine handles image/audio tokens properly.
+   * If not specified, the system will fall back to filename sniffing.
+   */
+  multimodal?: boolean;
+
+  /**
+   * List of tools/functions that the model can call.
+   */
+  tools?: ToolDefinition[];
+
+  /**
+   * Whether to enable speculative decoding (multi-token prediction) if supported by the model.
+   * @default false
+   */
+  enableSpeculativeDecoding?: boolean;
 }
 
 /**
@@ -152,7 +201,7 @@ export interface MemoryUsage {
  * ```
  */
 export interface LiteRTLM extends HybridObject<{
-  ios: "c++";
+  ios: "swift";
   android: "kotlin";
 }> {
   /**
@@ -205,6 +254,13 @@ export interface LiteRTLM extends HybridObject<{
   sendMessageWithAudio(message: string, audioPath: string): Promise<string>;
 
   /**
+   * Send a unified multimodal message containing text and/or zero-copy binary buffers.
+   * @param parts The message content parts (text, image, and/or audio).
+   * @returns The model's response text.
+   */
+  sendMultimodalMessage(parts: MultimodalPart[]): Promise<string>;
+
+  /**
    * Send a message with streaming response.
    * Tokens are delivered via callback as they are generated.
    * @param message User message text.
@@ -213,7 +269,7 @@ export interface LiteRTLM extends HybridObject<{
   sendMessageAsync(
     message: string,
     onToken: (token: string, done: boolean) => void,
-  ): void;
+  ): Promise<void>;
 
   /**
    * Get the current conversation history.
@@ -235,6 +291,11 @@ export interface LiteRTLM extends HybridObject<{
    * Get the last generation statistics.
    */
   getStats(): GenerationStats;
+
+  /**
+   * Count tokens in a text string. Returns -1 if unavailable.
+   */
+  countTokens(text: string): number;
 
   /**
    * Get real memory usage from the native runtime.
