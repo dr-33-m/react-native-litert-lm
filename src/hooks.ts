@@ -64,7 +64,8 @@ export function useModel(
   const [isGenerating, setIsGenerating] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [memorySummary, setMemorySummary] = useState<MemoryTrackerSummary | null>(null);
+  const [memorySummary, setMemorySummary] =
+    useState<MemoryTrackerSummary | null>(null);
 
   // Destructure config into primitive values for stable dependency arrays.
   // This prevents infinite re-render loops when consumers pass inline config
@@ -78,6 +79,10 @@ export function useModel(
   const temperature = config?.temperature;
   const topK = config?.topK;
   const topP = config?.topP;
+  const validate = config?.validate;
+  const multimodal = config?.multimodal;
+  const tools = config?.tools;
+  const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
 
   // Build a stable config object from the destructured primitives
   const nativeConfig = useMemo<LLMConfig>(
@@ -88,8 +93,25 @@ export function useModel(
       ...(temperature !== undefined && { temperature }),
       ...(topK !== undefined && { topK }),
       ...(topP !== undefined && { topP }),
+      ...(validate !== undefined && { validate }),
+      ...(multimodal !== undefined && { multimodal }),
+      ...(tools !== undefined && { tools }),
+      ...(enableSpeculativeDecoding !== undefined && {
+        enableSpeculativeDecoding,
+      }),
     }),
-    [backend, systemPrompt, maxTokens, temperature, topK, topP],
+    [
+      backend,
+      systemPrompt,
+      maxTokens,
+      temperature,
+      topK,
+      topP,
+      validate,
+      multimodal,
+      tools,
+      enableSpeculativeDecoding,
+    ],
   );
 
   /**
@@ -165,16 +187,15 @@ export function useModel(
         return new Promise<string>((resolve, reject) => {
           let fullResponse = "";
           try {
-            modelRef.current?.sendMessageAsync(
-              prompt,
-              (token: string, done: boolean) => {
+            modelRef.current
+              ?.sendMessageAsync(prompt, (token: string, done: boolean) => {
                 fullResponse += token;
                 if (done) {
                   refreshMemorySummary();
                   resolve(fullResponse);
                 }
-              },
-            ).catch(reject);
+              })
+              .catch(reject);
           } catch (e: any) {
             reject(e);
           }
