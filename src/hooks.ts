@@ -83,6 +83,7 @@ export function useModel(
   const multimodal = config?.multimodal;
   const tools = config?.tools;
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
+  const toolsKey = tools ? JSON.stringify(tools) : undefined;
 
   // Build a stable config object from the destructured primitives
   const nativeConfig = useMemo<LLMConfig>(
@@ -109,7 +110,7 @@ export function useModel(
       topP,
       validate,
       multimodal,
-      tools,
+      toolsKey,
       enableSpeculativeDecoding,
     ],
   );
