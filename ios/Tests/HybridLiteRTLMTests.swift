@@ -53,6 +53,18 @@ class HybridLiteRTLMTests: XCTestCase {
         }
     }
 
+    func testSendMessageAsyncRejectsWithoutModel() async throws {
+        do {
+            let promise = try bridge.sendMessageAsync(message: "hello") { _, _ in }
+            _ = try await promise.await()
+            XCTFail("Should have failed without model")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertEqual(nsError.domain, "LiteRTLM")
+            XCTAssertEqual(nsError.code, 400)
+        }
+    }
+
     func testSendMessageWithImageAsyncRejectsWithoutModel() async throws {
         do {
             let promise = try bridge.sendMessageWithImageAsync(message: "hello", imagePath: "/tmp/image.jpg") { _, _ in }

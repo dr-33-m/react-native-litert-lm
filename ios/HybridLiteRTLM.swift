@@ -14,6 +14,7 @@ import os
 /// A stream context passed to the low-level C FFI callback to forward chunks safely to the JS thread.
 private class StreamContext {
     let userMessage: String
+    let historyUserContent: String
     let startTime: Date
     let onToken: (_ token: String, _ done: Bool) -> Void
     let promise: Promise<Void>
@@ -26,12 +27,14 @@ private class StreamContext {
     
     init(
         userMessage: String,
+        historyUserContent: String? = nil,
         startTime: Date,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
         promise: Promise<Void>,
         parent: HybridLiteRTLM
     ) {
         self.userMessage = userMessage
+        self.historyUserContent = historyUserContent ?? userMessage
         self.startTime = startTime
         self.onToken = onToken
         self.promise = promise
@@ -571,6 +574,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             let historyUserContent = message + " [image: \(imagePath)]"
             let context = StreamContext(
                 userMessage: message,
+                historyUserContent: historyUserContent,
                 startTime: startTime,
                 onToken: onToken,
                 promise: promise,
@@ -609,37 +613,39 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     }
                     ctx.fullResponse = finalCleaned
                     
-                    var completionTokens = Double(ctx.tokenCount)
-                    var tokensPerSecond = 0.0
-                    var ttft = 0.0
-                    if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
-                        let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
-                        if numDecodeTurns > 0 {
-                            let lastIdx = numDecodeTurns - 1
-                            tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
-                            completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                    ctx.parent.queue.async {
+                        var completionTokens = Double(ctx.tokenCount)
+                        var tokensPerSecond = 0.0
+                        var ttft = 0.0
+                        if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
+                            let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
+                            if numDecodeTurns > 0 {
+                                let lastIdx = numDecodeTurns - 1
+                                tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
+                                completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                            }
+                            ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
+                            litert_lm_benchmark_info_delete(benchInfo)
                         }
-                        ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
-                        litert_lm_benchmark_info_delete(benchInfo)
-                    }
 
-                    let promptTokens = Double(ctx.userMessage.count) / 4.0
-                    if completionTokens == 0.0 {
-                        completionTokens = Double(ctx.fullResponse.count) / 4.0
+                        let promptTokens = Double(ctx.userMessage.count) / 4.0
+                        if completionTokens == 0.0 {
+                            completionTokens = Double(ctx.fullResponse.count) / 4.0
+                        }
+                        ctx.parent.lastStats = GenerationStats(
+                            promptTokens: promptTokens,
+                            completionTokens: completionTokens,
+                            totalTokens: promptTokens + completionTokens,
+                            timeToFirstToken: ttft,
+                            totalTime: totalTime,
+                            tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
+                        )
+                        ctx.parent.history.append(Message(role: .user, content: ctx.historyUserContent))
+                        ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
+                        ctx.onToken("", true)
+                        ctx.promise.resolve()
+                        Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     }
-                    ctx.parent.lastStats = GenerationStats(
-                        promptTokens: promptTokens,
-                        completionTokens: completionTokens,
-                        totalTokens: promptTokens + completionTokens,
-                        timeToFirstToken: ttft,
-                        totalTime: totalTime,
-                        tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
-                    )
-                    ctx.parent.history.append(Message(role: .user, content: historyUserContent))
-                    ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
-                    ctx.onToken("", true)
-                    ctx.promise.resolve()
-                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     return
                 }
 
@@ -710,6 +716,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             let historyUserContent = message + " [audio: \(audioPath)]"
             let context = StreamContext(
                 userMessage: message,
+                historyUserContent: historyUserContent,
                 startTime: startTime,
                 onToken: onToken,
                 promise: promise,
@@ -748,37 +755,39 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                     }
                     ctx.fullResponse = finalCleaned
 
-                    var completionTokens = Double(ctx.tokenCount)
-                    var tokensPerSecond = 0.0
-                    var ttft = 0.0
-                    if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
-                        let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
-                        if numDecodeTurns > 0 {
-                            let lastIdx = numDecodeTurns - 1
-                            tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
-                            completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                    ctx.parent.queue.async {
+                        var completionTokens = Double(ctx.tokenCount)
+                        var tokensPerSecond = 0.0
+                        var ttft = 0.0
+                        if let benchInfo = litert_lm_conversation_get_benchmark_info(ctx.parent.conversation) {
+                            let numDecodeTurns = litert_lm_benchmark_info_get_num_decode_turns(benchInfo)
+                            if numDecodeTurns > 0 {
+                                let lastIdx = numDecodeTurns - 1
+                                tokensPerSecond = litert_lm_benchmark_info_get_decode_tokens_per_sec_at(benchInfo, lastIdx)
+                                completionTokens = Double(litert_lm_benchmark_info_get_decode_token_count_at(benchInfo, lastIdx))
+                            }
+                            ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
+                            litert_lm_benchmark_info_delete(benchInfo)
                         }
-                        ttft = litert_lm_benchmark_info_get_time_to_first_token(benchInfo)
-                        litert_lm_benchmark_info_delete(benchInfo)
-                    }
 
-                    let promptTokens = Double(ctx.userMessage.count) / 4.0
-                    if completionTokens == 0.0 {
-                        completionTokens = Double(ctx.fullResponse.count) / 4.0
+                        let promptTokens = Double(ctx.userMessage.count) / 4.0
+                        if completionTokens == 0.0 {
+                            completionTokens = Double(ctx.fullResponse.count) / 4.0
+                        }
+                        ctx.parent.lastStats = GenerationStats(
+                            promptTokens: promptTokens,
+                            completionTokens: completionTokens,
+                            totalTokens: promptTokens + completionTokens,
+                            timeToFirstToken: ttft,
+                            totalTime: totalTime,
+                            tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
+                        )
+                        ctx.parent.history.append(Message(role: .user, content: ctx.historyUserContent))
+                        ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
+                        ctx.onToken("", true)
+                        ctx.promise.resolve()
+                        Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     }
-                    ctx.parent.lastStats = GenerationStats(
-                        promptTokens: promptTokens,
-                        completionTokens: completionTokens,
-                        totalTokens: promptTokens + completionTokens,
-                        timeToFirstToken: ttft,
-                        totalTime: totalTime,
-                        tokensPerSecond: tokensPerSecond > 0.0 ? tokensPerSecond : (completionTokens / totalTime)
-                    )
-                    ctx.parent.history.append(Message(role: .user, content: historyUserContent))
-                    ctx.parent.history.append(Message(role: .model, content: ctx.fullResponse))
-                    ctx.onToken("", true)
-                    ctx.promise.resolve()
-                    Unmanaged<StreamContext>.fromOpaque(callbackData).release()
                     return
                 }
 
