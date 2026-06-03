@@ -30,6 +30,8 @@ export type {
 export { createMemoryTracker, createNativeBuffer } from "./memoryTracker";
 
 export type { LiteRTLMInstance } from "./modelFactory";
+export { ModelRegistry } from "./modelRegistry";
+export type { ModelDownloadOptions } from "./modelRegistry";
 export * from "./hooks";
 
 /**

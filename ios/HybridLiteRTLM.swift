@@ -1029,103 +1029,15 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         fileName: String,
         onProgress: ((Double) -> Void)?
     ) throws -> Promise<String> {
-        let promise = Promise<String>()
-        
-        queue.async {
-            do {
-                if fileName.contains("..") || fileName.contains("/") || fileName.contains("\\") {
-                    promise.reject(withError: NSError(domain: "LiteRTLM", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid filename: path traversal or directory separators are not allowed."]))
-                    return
-                }
-                
-                let cachesDir = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
-                let modelsDir = (cachesDir as NSString).appendingPathComponent("litert_models")
-                
-                let fileManager = FileManager.default
-                if !fileManager.fileExists(atPath: modelsDir) {
-                    try fileManager.createDirectory(atPath: modelsDir, withIntermediateDirectories: true, attributes: nil)
-                }
-                
-                let destPath = (modelsDir as NSString).appendingPathComponent(fileName)
-                
-                // Fast cache check
-                if fileManager.fileExists(atPath: destPath) {
-                    let attrs = try fileManager.attributesOfItem(atPath: destPath)
-                    if let fileSize = attrs[.size] as? UInt64, fileSize > 0 {
-                        onProgress?(1.0)
-                        promise.resolve(withResult: destPath)
-                        return
-                    }
-                }
-                
-                guard let downloadUrl = URL(string: url), downloadUrl.scheme?.lowercased() == "https" else {
-                    promise.reject(withError: NSError(domain: "LiteRTLM", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid download URL: HTTPS is required for security."]))
-                    return
-                }
-                
-                onProgress?(0.0)
-                
-                let sessionConfig = URLSessionConfiguration.default
-                sessionConfig.timeoutIntervalForRequest = 30
-                sessionConfig.timeoutIntervalForResource = 3600
-                
-                let session = URLSession(configuration: sessionConfig)
-                var progressHandler: NSKeyValueObservation?
-                
-                let task = session.downloadTask(with: downloadUrl) { location, response, error in
-                    progressHandler?.invalidate()
-                    
-                    if let error = error {
-                        promise.reject(withError: error)
-                        return
-                    }
-                    
-                    if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode >= 400 {
-                        promise.reject(withError: NSError(domain: "LiteRTLM", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode)"]))
-                        return
-                    }
-                    
-                    guard let location = location else {
-                        promise.reject(withError: NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "No download location found."]))
-                        return
-                    }
-                    
-                    do {
-                        if fileManager.fileExists(atPath: destPath) {
-                            try fileManager.removeItem(atPath: destPath)
-                        }
-                        try fileManager.moveItem(at: location, to: URL(fileURLWithPath: destPath))
-                        onProgress?(1.0)
-                        promise.resolve(withResult: destPath)
-                    } catch {
-                        promise.reject(withError: error)
-                    }
-                }
-                
-                if let onProgress = onProgress {
-                    var lastUpdate = Date()
-                    progressHandler = task.observe(\.countOfBytesReceived, options: [.new]) { task, _ in
-                        let expected = task.countOfBytesExpectedToReceive
-                        if expected > 0 {
-                            let now = Date()
-                            // Throttled progress notifications to 10Hz
-                            if now.timeIntervalSince(lastUpdate) > 0.1 {
-                                let progress = Double(task.countOfBytesReceived) / Double(expected)
-                                onProgress(progress)
-                                lastUpdate = now
-                            }
-                        }
-                    }
-                }
-                
-                task.resume()
-                session.finishTasksAndInvalidate()
-            } catch {
-                promise.reject(withError: error)
+        let store = HybridModelStore()
+        return try store.downloadFile(
+            url: url,
+            fileName: fileName,
+            headersJson: "",
+            onProgress: { progress in
+                onProgress?(progress)
             }
-        }
-        
-        return promise
+        )
     }
     
     public func deleteModel(fileName: String) throws -> Promise<Void> {
@@ -1133,21 +1045,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         queue.async {
             do {
-                if fileName.contains("..") || fileName.contains("/") || fileName.contains("\\") {
-                    promise.reject(withError: NSError(domain: "LiteRTLM", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid filename: path traversal or directory separators are not allowed."]))
-                    return
-                }
-                
-                let cachesDir = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first ?? NSTemporaryDirectory()
-                let modelsDir = (cachesDir as NSString).appendingPathComponent("litert_models")
-                let destPath = (modelsDir as NSString).appendingPathComponent(fileName)
-                
-                let fileManager = FileManager.default
-                if fileManager.fileExists(atPath: destPath) {
-                    try fileManager.removeItem(atPath: destPath)
-                    if self.isLoaded {
-                        self.closeInternal()
-                    }
+                let store = HybridModelStore()
+                try store.deleteFile(fileName: fileName)
+                if self.isLoaded {
+                    self.closeInternal()
                 }
                 promise.resolve()
             } catch {

@@ -14,6 +14,10 @@
     "LiteRTLM": {
       "ios": { "language": "swift", "implementationClassName": "HybridLiteRTLM" },
       "android": { "language": "kotlin", "implementationClassName": "HybridLiteRTLM" }
+    },
+    "ModelStore": {
+      "ios": { "language": "swift", "implementationClassName": "HybridModelStore" },
+      "android": { "language": "kotlin", "implementationClassName": "HybridModelStore" }
     }
   },
   "ignorePaths": ["**/node_modules"]

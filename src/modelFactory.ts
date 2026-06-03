@@ -1,6 +1,7 @@
 import { NitroModules } from "react-native-nitro-modules";
 import { LiteRTLM, LLMConfig } from "./specs/LiteRTLM.nitro";
 import { createMemoryTracker, MemoryTracker } from "./memoryTracker";
+import { ModelRegistry } from "./modelRegistry";
 
 /**
  * Extended LiteRT-LM instance with optional memory tracking and
@@ -59,35 +60,11 @@ export function createLLM(options?: {
     config?: LLMConfig,
     onDownloadProgress?: (progress: number) => void,
   ) => {
-    let modelPath = pathOrUrl;
-
-    // Check if it's a URL — enforce HTTPS for model downloads
-    if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
-      if (pathOrUrl.startsWith("http://")) {
-        throw new Error(
-          "Insecure HTTP URLs are not allowed for model downloads. " +
-            "Use HTTPS instead: " +
-            pathOrUrl.replace("http://", "https://"),
-        );
-      }
-
-      // Extract filename from URL, stripping query parameters
-      const urlWithoutQuery = pathOrUrl.split("?")[0];
-      const fileName = urlWithoutQuery.split("/").pop();
-      if (!fileName) {
-        throw new Error(`Invalid model URL: ${pathOrUrl}`);
-      }
-
-      console.log(`Checking model at ${pathOrUrl}...`);
-      modelPath = await native.downloadModel(
-        pathOrUrl,
-        fileName,
-        (progress) => {
-          onDownloadProgress?.(progress);
-        },
-      );
-      console.log(`Model downloaded to: ${modelPath}`);
-    }
+    console.log(`Resolving model at ${pathOrUrl}...`);
+    const modelPath = await ModelRegistry.resolveModel(pathOrUrl, {
+      onProgress: onDownloadProgress,
+    });
+    console.log(`Model resolved to: ${modelPath}`);
 
     const result = await native.loadModel(modelPath, config);
 

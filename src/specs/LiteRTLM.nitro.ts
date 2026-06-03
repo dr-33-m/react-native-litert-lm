@@ -238,13 +238,9 @@ export interface LiteRTLM extends HybridObject<{
     imagePath: string,
     onToken: (token: string, done: boolean) => void,
   ): Promise<void>;
-
   /**
    * Download a model file from a URL.
-   * @param url URL to download from.
-   * @param fileName Filename to save as (in app's files directory).
-   * @param onProgress Callback for download progress (0.0 - 1.0).
-   * @returns Absolute path to the downloaded file.
+   * @deprecated Use ModelRegistry instead.
    */
   downloadModel(
     url: string,
@@ -254,10 +250,9 @@ export interface LiteRTLM extends HybridObject<{
 
   /**
    * Delete a downloaded model file.
-   * @param fileName Filename to delete (in app's files directory).
+   * @deprecated Use ModelRegistry instead.
    */
   deleteModel(fileName: string): Promise<void>;
-
   /**
    * Send a text message with audio (multimodal).
    * @param message User message text.
@@ -334,4 +329,27 @@ export interface LiteRTLM extends HybridObject<{
    * Call this when done with the LLM instance.
    */
   close(): void;
+}
+
+export interface ModelFile {
+  fileName: string;
+  absolutePath: string;
+  sizeBytes: number;
+  lastModifiedMs: number;
+}
+
+export interface ModelStore extends HybridObject<{
+  ios: "swift";
+  android: "kotlin";
+}> {
+  isCached(fileName: string): boolean;
+  getFilePath(fileName: string): string;
+  listCachedFiles(): ModelFile[];
+  deleteFile(fileName: string): void;
+  downloadFile(
+    url: string,
+    fileName: string,
+    headersJson: string,
+    onProgress: (progress: number) => void
+  ): Promise<string>;
 }

@@ -571,123 +571,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
-        return Promise.parallel {
-            Log.i(TAG, "downloadModel: $url -> $fileName")
-            
-            if (!url.startsWith("https://", ignoreCase = true)) {
-                throw IllegalArgumentException("Invalid download URL: HTTPS is required for security.")
-            }
-            
-            if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
-                throw IllegalArgumentException("Invalid filename: path traversal or directory separators are not allowed.")
-            }
-            
-            val context = LiteRTLMInitProvider.applicationContext ?: throw RuntimeException("Context not available")
-            val modelsDir = java.io.File(context.filesDir, "models")
-            if (!modelsDir.exists()) {
-                modelsDir.mkdirs()
-            }
-            
-            val modelFile = java.io.File(modelsDir, fileName)
-            val tempFile = java.io.File(modelsDir, "$fileName.tmp")
-            
-            // Check if file exists and has content
-            if (modelFile.exists() && modelFile.length() > 0) {
-                Log.i(TAG, "Model already exists at: ${modelFile.absolutePath}")
-                onProgress?.invoke(1.0)
-                return@parallel modelFile.absolutePath
-            }
-            
-            Log.i(TAG, "Downloading model to temp file: ${tempFile.absolutePath}")
-            onProgress?.invoke(0.0)
-            
-            try {
-                val connection = java.net.URL(url).openConnection() as java.net.HttpURLConnection
-                connection.connectTimeout = 15000 // 15s
-                connection.readTimeout = 0 // Infinite for large files
-                connection.doInput = true
-                connection.connect()
-                
-                if (connection.responseCode != java.net.HttpURLConnection.HTTP_OK) {
-                    throw RuntimeException("Failed to download model: HTTP ${connection.responseCode}")
-                }
-                
-                val contentLength = connection.contentLengthLong // Use long for large files
-                val input = connection.inputStream
-                val output = java.io.FileOutputStream(tempFile)
-                
-                val buffer = ByteArray(8 * 1024)
-                var bytesRead: Int
-                var totalBytesRead = 0L
-                var lastProgressUpdate = 0L
-                
-                while (input.read(buffer).also { bytesRead = it } != -1) {
-                    output.write(buffer, 0, bytesRead)
-                    totalBytesRead += bytesRead
-                    
-                    if (contentLength > 0 && onProgress != null) {
-                        val currentTime = System.currentTimeMillis()
-                        // Update roughly every 100ms to avoid flooding JS bridge
-                        if (currentTime - lastProgressUpdate > 100) {
-                            val progress = totalBytesRead.toDouble() / contentLength.toDouble()
-                            onProgress(progress)
-                            lastProgressUpdate = currentTime
-                        }
-                    }
-                }
-                
-                output.flush()
-                output.close()
-                input.close()
-                connection.disconnect()
-                
-                // Atomic rename
-                if (tempFile.renameTo(modelFile)) {
-                    Log.i(TAG, "Download complete and renamed to: ${modelFile.absolutePath}")
-                    onProgress?.invoke(1.0)
-                    return@parallel modelFile.absolutePath
-                } else {
-                    throw RuntimeException("Failed to rename temp file to model file")
-                }
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Download failed", e)
-                if (tempFile.exists()) {
-                    tempFile.delete()
-                }
-                throw RuntimeException("Download failed: ${e.message}", e)
-            }
-        }
+        val store = HybridModelStore()
+        return store.downloadFile(url, fileName, "", onProgress ?: {})
     }
 
     override fun deleteModel(fileName: String): Promise<Unit> {
         return Promise.parallel {
-            Log.i(TAG, "deleteModel: $fileName")
-            
-            if (fileName.contains("..") || fileName.contains("/") || fileName.contains("\\")) {
-                throw IllegalArgumentException("Invalid filename: path traversal or directory separators are not allowed.")
-            }
-            
-            val context = LiteRTLMInitProvider.applicationContext ?: throw RuntimeException("Context not available")
-            val modelsDir = java.io.File(context.filesDir, "models")
-            val modelFile = java.io.File(modelsDir, fileName)
-            
-            if (modelFile.exists()) {
-                val deleted = modelFile.delete()
-                if (deleted) {
-                    Log.i(TAG, "Deleted model: ${modelFile.absolutePath}")
-                    // Ensure engine references are cleared if they point to this file
-                    // We use cleanupInternal() which releases resources WITHOUT marking the instance as closed.
-                    if (engine != null) {
-                        Log.i(TAG, "Cleaning up engine after deleting model file.")
-                        cleanupInternal()
-                    }
-                } else {
-                    Log.e(TAG, "Failed to delete model: ${modelFile.absolutePath}")
-                    throw RuntimeException("Failed to delete model: ${modelFile.absolutePath}")
-                }
-            } else {
-                Log.w(TAG, "Model not found for deletion: ${modelFile.absolutePath}")
+            val store = HybridModelStore()
+            store.deleteFile(fileName)
+            if (engine != null) {
+                cleanupInternal()
             }
         }
     }

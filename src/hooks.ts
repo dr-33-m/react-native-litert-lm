@@ -3,6 +3,7 @@ import { LLMConfig } from "./index";
 import { createLLM } from "./modelFactory";
 import type { LiteRTLMInstance } from "./modelFactory";
 import type { MemoryTracker, MemoryTrackerSummary } from "./memoryTracker";
+import { ModelRegistry } from "./modelRegistry";
 
 export interface UseModelConfig extends LLMConfig {
   autoLoad?: boolean;
@@ -219,12 +220,10 @@ export function useModel(
 
   const deleteModel = useCallback(
     async (fileName?: string): Promise<void> => {
-      if (modelRef.current) {
-        const resolvedName = fileName ?? extractFileName(pathOrUrl);
-        await modelRef.current.deleteModel(resolvedName);
-        setIsReady(false);
-        setDownloadProgress(0);
-      }
+      const resolvedName = fileName ?? extractFileName(pathOrUrl);
+      ModelRegistry.deleteFile(resolvedName);
+      setIsReady(false);
+      setDownloadProgress(0);
     },
     [pathOrUrl],
   );

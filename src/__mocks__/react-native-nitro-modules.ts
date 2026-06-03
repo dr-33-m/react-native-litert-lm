@@ -45,10 +45,25 @@ export const mockLiteRTLM = {
   close: jest.fn(),
 };
 
+export const mockModelStore = {
+  isCached: jest.fn((fileName) => false),
+  getFilePath: jest.fn((fileName) => `/mock/path/${fileName}`),
+  listCachedFiles: jest.fn(() => []),
+  deleteFile: jest.fn((fileName) => {
+    return mockLiteRTLM.deleteModel(fileName);
+  }),
+  downloadFile: jest.fn(async (url, fileName, headersJson, onProgress) => {
+    return mockLiteRTLM.downloadModel(url, fileName, onProgress);
+  }),
+};
+
 export const NitroModules = {
   createHybridObject: jest.fn((name: string) => {
     if (name === "LiteRTLM") {
       return mockLiteRTLM;
+    }
+    if (name === "ModelStore") {
+      return mockModelStore;
     }
     throw new Error(`Mock not implemented for hybrid object: ${name}`);
   }),
