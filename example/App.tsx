@@ -34,14 +34,7 @@ import {
 const TEST_IMAGE_ASSET = require("./test.jpeg");
 const TEST_AUDIO_ASSET = require("./test.wav");
 
-async function getTestImagePath(inst?: any): Promise<string> {
-  if (Platform.OS === "android") return "/data/local/tmp/test.jpeg";
-  const src = Image.resolveAssetSource(TEST_IMAGE_ASSET);
-  if (src.uri.startsWith("file://")) return src.uri.replace("file://", "");
-  if (inst?.downloadModel)
-    return inst.downloadModel(src.uri, "test_image.jpeg");
-  throw new Error("Cannot resolve test image in dev mode");
-}
+
 
 // ─── Theme ───────────────────────────────────────────────────────────────────
 const T = {
@@ -119,19 +112,19 @@ function Main() {
       enableSpeculativeDecoding,
       tools: enableTools
         ? [
-            {
-              name: "get_current_weather",
-              description: "Get the current weather for a location",
-              parametersJson: JSON.stringify({
-                type: "object",
-                properties: {
-                  location: { type: "string", description: "The city and state, e.g. San Francisco, CA" },
-                  unit: { type: "string", enum: ["celsius", "fahrenheit"] }
-                },
-                required: ["location"]
-              })
-            }
-          ]
+          {
+            name: "get_current_weather",
+            description: "Get the current weather for a location",
+            parametersJson: JSON.stringify({
+              type: "object",
+              properties: {
+                location: { type: "string", description: "The city and state, e.g. San Francisco, CA" },
+                unit: { type: "string", enum: ["celsius", "fahrenheit"] }
+              },
+              required: ["location"]
+            })
+          }
+        ]
         : undefined,
     }),
     [backend, enableSpeculativeDecoding, enableTools],
@@ -171,54 +164,42 @@ function Main() {
     setStreaming("");
 
     try {
-      if (currentAttachment) {
-        setStreaming("Reading attachment and generating response...");
-        const parts: any[] = [];
-        
-        if (currentAttachment === "image") {
-          const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
-          const response = await fetch(uri);
-          const buffer = await response.arrayBuffer();
-          parts.push({ type: "image", imageBuffer: buffer });
-        } else if (currentAttachment === "audio") {
-          const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
-          const response = await fetch(uri);
-          const buffer = await response.arrayBuffer();
-          parts.push({ type: "audio", audioBuffer: buffer });
-        }
-        
-        if (msg) {
-          parts.push({ type: "text", text: msg });
-        }
+      const parts: any[] = [];
 
-        const reply = await model.sendMultimodalMessage(parts);
-        setChat((prev) => [
-          ...prev,
-          { role: "model", text: reply, ts: Date.now() },
-        ]);
-        setStreaming("");
-      } else {
-        await new Promise<void>((resolve, reject) => {
-          let full = "";
-          model.sendMessageAsync(msg, (token: string, done: boolean) => {
-            if (!done) {
-              full += token;
-              setStreaming(full);
-            } else {
-              setChat((prev) => [
-                ...prev,
-                { role: "model", text: full, ts: Date.now() },
-              ]);
-              setStreaming("");
-              resolve();
-            }
-          }).catch(reject);
-        });
+      if (currentAttachment === "image") {
+        const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
+        const response = await fetch(uri);
+        const buffer = await response.arrayBuffer();
+        parts.push({ type: "image", imageBuffer: buffer });
+      } else if (currentAttachment === "audio") {
+        const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
+        const response = await fetch(uri);
+        const buffer = await response.arrayBuffer();
+        parts.push({ type: "audio", audioBuffer: buffer });
       }
+
+      if (msg) {
+        parts.push({ type: "text", text: msg });
+      }
+
+      setStreaming(currentAttachment ? "Reading attachment..." : "");
+
+      let full = "";
+      const reply = await model.execute(parts, (token) => {
+        full += token;
+        setStreaming(full);
+      });
+
+      setChat((prev) => [
+        ...prev,
+        { role: "model", text: reply, ts: Date.now() },
+      ]);
+      setStreaming("");
+
       // Refresh memory stats
       try {
         setLiveMemory(model.getMemoryUsage());
-      } catch {}
+      } catch { }
     } catch (e: any) {
       setChat((prev) => [
         ...prev,
@@ -402,7 +383,7 @@ function Main() {
                       : "gemma-3n-E2B-it-int4.litertlm";
                   try {
                     await deleteModel(fn);
-                  } catch {}
+                  } catch { }
                 }}
               >
                 <Text style={s.dangerText}>Delete Cached Model</Text>
@@ -543,7 +524,7 @@ function Main() {
                 </TouchableOpacity>
               </View>
             )}
-            
+
             <View style={s.inputBar}>
               <TouchableOpacity
                 style={s.attachBtn}
@@ -565,7 +546,7 @@ function Main() {
               >
                 <Text style={s.attachIcon}>📎</Text>
               </TouchableOpacity>
-              
+
               <TextInput
                 style={s.input}
                 placeholder={attachment ? "Add message with attachment..." : "Message…"}
