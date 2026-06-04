@@ -41,71 +41,7 @@ import java.util.concurrent.atomic.AtomicReference
 // Alias to avoid confusion
 typealias LiteRTMessage = com.google.ai.edge.litertlm.Message
 
-/**
- * Named implementation of the LiteRT-LM MessageCallback for streaming inference.
- *
- * Extracted from the anonymous inline class in sendMessageAsync for testability.
- * Accumulates response chunks, forwards tokens to JS, and appends the final
- * response to the conversation history.
- */
-internal class StreamingCallbackListener(
-    private val onToken: (String, Boolean) -> Unit,
-    private val responseBuilder: StringBuilder,
-    private val history: MutableList<Message>,
-    private val userMessage: String,
-    private val onStatsReady: (GenerationStats) -> Unit,
-) : com.google.ai.edge.litertlm.MessageCallback {
 
-    private val startTime = System.nanoTime()
-    private var firstTokenTime = 0L
-    private var tokenCount = 0
-
-    override fun onMessage(message: com.google.ai.edge.litertlm.Message) {
-        val chunk = message.contents.contents
-            .filterIsInstance<com.google.ai.edge.litertlm.Content.Text>()
-            .joinToString("") { it.text }
-
-        if (firstTokenTime == 0L && chunk.isNotEmpty()) {
-            firstTokenTime = System.nanoTime()
-        }
-        if (chunk.isNotEmpty()) {
-            tokenCount++
-        }
-
-        onToken(chunk, false)
-
-        if (chunk.isNotEmpty()) {
-            responseBuilder.append(chunk)
-        }
-    }
-
-    override fun onDone() {
-        onToken("", true)
-        val fullResponse = responseBuilder.toString()
-        history.add(Message(Role.MODEL, fullResponse))
-
-        // Compute stats using heuristic token counts (~4 chars/token)
-        val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
-        val ttftMs = if (firstTokenTime > 0) (firstTokenTime - startTime) / 1_000_000.0 else 0.0
-        val promptTokens = userMessage.length / 4.0
-        val completionTokens = fullResponse.length / 4.0
-        onStatsReady(GenerationStats(
-            promptTokens = promptTokens,
-            completionTokens = completionTokens,
-            totalTokens = promptTokens + completionTokens,
-            timeToFirstToken = ttftMs,
-            totalTime = elapsedMs,
-            tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
-        ))
-
-        Log.d("StreamingCallbackListener", "Streaming done. Length: ${fullResponse.length}, TTFT: ${ttftMs.toLong()}ms, Total: ${elapsedMs.toLong()}ms")
-    }
-
-    override fun onError(throwable: Throwable) {
-        Log.e("StreamingCallbackListener", "Async generation failed", throwable)
-        onToken("Error: ${throwable.message}", true)
-    }
-}
 
 /**
  * Kotlin implementation of LiteRTLM using the LiteRT-LM Android SDK.
@@ -169,7 +105,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var temperature: Double = 0.7
     private var topK: Int = 40
     private var topP: Double = 0.95
-    private var maxTokens: Int = 1024
+    private var maxTokens: Int = 2048
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
@@ -322,102 +258,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // sendMessage - Helper for one-shot generation (internally uses Async)
-    // -------------------------------------------------------------------------
-    override fun sendMessage(message: String): Promise<String> {
-        // Implement Promise-based sendMessage using suspend coroutine logic wrapped in Promise
-        // Since Promise.parallel expects a blocking block returning T, 
-        // and sendMessageAsync is callback-based, we need to bridge them.
-        // HOWEVER, we can just use the synchronous `sendMessage` API of the SDK 
-        // inside the `Promise.parallel` block, which moves it off the main thread!
-        return Promise.parallel {
-            ensureLoaded()
+    // Legacy inference — shapes mirror src/inferenceRouting.ts; JS createLLM routes via execute.
+    override fun sendMessage(message: String): Promise<String> =
+        execute(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = null)
 
-            // Add user message to history
-            history.add(Message(Role.USER, message))
-            Log.i(TAG, "sendMessage (Promise): $message")
-            
-            // Blocking inference (safe here because we are in Promise.parallel worker thread)
-            val userMsg = LiteRTMessage.user(message)
-            val startTime = System.nanoTime()
-            val responseMsg = conversation!!.sendMessage(message = userMsg)
-            val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
-            
-            // Extract text
-            val response = responseMsg.contents.contents
-                .filterIsInstance<com.google.ai.edge.litertlm.Content.Text>()
-                .joinToString("") { it.text } 
-            
-            // Add model response to history
-            history.add(Message(Role.MODEL, response))
-            
-            // Update stats with real timing data
-            // Token count heuristic: LiteRT-LM Android SDK does not expose
-            // actual token counts from inference. We approximate using
-            // ~4 chars/token. iOS uses the C API benchmark info for real counts.
-            val promptTokens = message.length / 4.0
-            val completionTokens = response.length / 4.0
-            lastStats = GenerationStats(
-                promptTokens = promptTokens,
-                completionTokens = completionTokens,
-                totalTokens = promptTokens + completionTokens,
-                timeToFirstToken = 0.0, // Not available from sync API
-                totalTime = elapsedMs,
-                tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
-            )
-            
-            response // Return the string
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // sendMessageAsync - Streaming inference
-    // -------------------------------------------------------------------------
-    override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
-        return Promise.parallel {
-            val latch = CountDownLatch(1)
-            val errorRef = AtomicReference<Throwable?>(null)
-
-            ensureLoaded()
-
-            // Add user message to history
-            history.add(Message(Role.USER, message))
-            Log.d(TAG, "sendMessageAsync: $message")
-
-            val fullResponseBuilder = StringBuilder()
-            
-            val listener = StreamingCallbackListener(
-                onToken = { token, done ->
-                    onToken(token, done)
-                    if (done) {
-                        latch.countDown()
-                    }
-                },
-                responseBuilder = fullResponseBuilder,
-                history = history,
-                userMessage = message,
-                onStatsReady = { stats -> lastStats = stats },
-            )
-
-            try {
-                val userMsg = LiteRTMessage.user(message)
-                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initiate async generation", e)
-                errorRef.set(e)
-                onToken("Error: ${e.message}", true)
-                latch.countDown()
-            }
-
-            // Wait for completion or error
-            latch.await()
-            val err = errorRef.get()
-            if (err != null) {
-                throw RuntimeException("Async inference failed: ${err.message}", err)
-            }
-        }
-    }
+    override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
+        executeVoid(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = onToken)
 
     // -------------------------------------------------------------------------
     // Multimodal methods
@@ -463,112 +309,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return tempFile.absolutePath
     }
 
-    override fun sendMessageWithImage(message: String, imagePath: String): Promise<String> {
-        return Promise.parallel {
-            ensureLoaded()
-            Log.i(TAG, "sendMessageWithImage: $message, path=$imagePath")
+    override fun sendMessageWithImage(message: String, imagePath: String): Promise<String> =
+        execute(
+            parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
+            onToken = null,
+        )
 
-            // Resize image to prevent OOM on high-resolution photos
-            val processedImagePath = resizeImageIfNeeded(imagePath)
-
-            // Create multimodal message
-            // Use factory method Message.of passing a list of Content
-            val textContent = Content.Text(message)
-            
-            val userMsg = LiteRTMessage.user(Contents.of(textContent, Content.ImageFile(processedImagePath)))
-
-            // Add to history
-            history.add(Message(Role.USER, "$message [Image]"))
-
-            val responseMsg = conversation!!.sendMessage(message = userMsg)
-            
-            val response = responseMsg.contents.contents
-                .filterIsInstance<Content.Text>()
-                .joinToString("") { it.text }
-
-            history.add(Message(Role.MODEL, response))
-
-            // Clean up temp resized image to prevent cache dir bloat
-            if (processedImagePath != imagePath) {
-                try {
-                    java.io.File(processedImagePath).delete()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to clean up temp image: ${e.message}")
-                }
-            }
-            
-            response
-        }
-    }
-
-    override fun sendMessageWithImageAsync(message: String, imagePath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
-        return Promise.parallel {
-            val latch = CountDownLatch(1)
-            val errorRef = AtomicReference<Throwable?>(null)
-
-            ensureLoaded()
-
-            Log.i(TAG, "sendMessageWithImageAsync: $message, path=$imagePath")
-
-            // Resize image to prevent OOM on high-resolution photos
-            val processedImagePath = resizeImageIfNeeded(imagePath)
-
-            val fullResponseBuilder = StringBuilder()
-            
-            val listener = StreamingCallbackListener(
-                onToken = { token, done ->
-                    onToken(token, done)
-                    if (done) {
-                        latch.countDown()
-                    }
-                },
-                responseBuilder = fullResponseBuilder,
-                history = history,
-                userMessage = message,
-                onStatsReady = { stats -> lastStats = stats },
-            )
-
-            try {
-                val textContent = Content.Text(message)
-                val userMsg = LiteRTMessage.user(Contents.of(textContent, Content.ImageFile(processedImagePath)))
-
-                history.add(Message(Role.USER, "$message [Image]"))
-
-                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
-            } catch (e: Exception) {
-                // Clean up temp resized image to prevent cache dir bloat
-                if (processedImagePath != imagePath) {
-                    try {
-                        java.io.File(processedImagePath).delete()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to clean up temp image: ${e.message}")
-                    }
-                }
-
-                Log.e(TAG, "Failed to initiate async multimodal generation", e)
-                errorRef.set(e)
-                onToken("Error: ${e.message}", true)
-                latch.countDown()
-            }
-
-            // Wait for completion or error
-            latch.await()
-
-            // Clean up temp resized image to prevent cache dir bloat
-            if (processedImagePath != imagePath) {
-                try {
-                    java.io.File(processedImagePath).delete()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to clean up temp image: ${e.message}")
-                }
-            }
-
-            val err = errorRef.get()
-            if (err != null) {
-                throw RuntimeException("Async multimodal inference failed: ${err.message}", err)
-            }
-        }
-    }
+    override fun sendMessageWithImageAsync(message: String, imagePath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
+        executeVoid(
+            parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
+            onToken = onToken,
+        )
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
         val store = HybridModelStore()
@@ -585,79 +336,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    override fun sendMessageWithAudioAsync(message: String, audioPath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> {
-        return Promise.parallel {
-            val latch = CountDownLatch(1)
-            val errorRef = AtomicReference<Throwable?>(null)
+    override fun sendMessageWithAudioAsync(message: String, audioPath: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
+        executeVoid(
+            parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
+            onToken = onToken,
+        )
 
-            ensureLoaded()
-
-            Log.i(TAG, "sendMessageWithAudioAsync: $message, path=$audioPath")
-
-            val fullResponseBuilder = StringBuilder()
-
-            val listener = StreamingCallbackListener(
-                onToken = { token, done ->
-                    onToken(token, done)
-                    if (done) {
-                        latch.countDown()
-                    }
-                },
-                responseBuilder = fullResponseBuilder,
-                history = history,
-                userMessage = message,
-                onStatsReady = { stats -> lastStats = stats },
-            )
-
-            try {
-                val userMsg = LiteRTMessage.user(Contents.of(
-                    Content.Text(message),
-                    Content.AudioFile(audioPath)
-                ))
-
-                history.add(Message(Role.USER, "$message [Audio]"))
-
-                conversation!!.sendMessageAsync(message = userMsg, callback = listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to initiate async audio generation", e)
-                errorRef.set(e)
-                onToken("Error: ${e.message}", true)
-                latch.countDown()
-            }
-
-            latch.await()
-            val err = errorRef.get()
-            if (err != null) {
-                throw RuntimeException("Async audio inference failed: ${err.message}", err)
-            }
-        }
-    }
-
-    override fun sendMessageWithAudio(message: String, audioPath: String): Promise<String> {
-        return Promise.parallel {
-            ensureLoaded()
-            Log.i(TAG, "sendMessageWithAudio: $message, path=$audioPath")
-
-            // Load audio
-            
-            val userMsg = LiteRTMessage.user(Contents.of(
-                Content.Text(message),
-                Content.AudioFile(audioPath)
-            ))
-
-            history.add(Message(Role.USER, "$message [Audio]"))
-            
-            val responseMsg = conversation!!.sendMessage(message = userMsg)
-            
-            val response = responseMsg.contents.contents
-                .filterIsInstance<Content.Text>()
-                .joinToString("") { it.text }
-                
-            history.add(Message(Role.MODEL, response))
-            
-            response
-        }
-    }
+    override fun sendMessageWithAudio(message: String, audioPath: String): Promise<String> =
+        execute(
+            parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
+            onToken = null,
+        )
 
     // -------------------------------------------------------------------------
     // Helpers
@@ -866,57 +555,180 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<String> {
+        return execute(parts = parts, onToken = null)
+    }
+
+    /** Streaming adapter for legacy `Promise<Unit>` APIs — all inference runs through [execute]. */
+    private fun executeVoid(
+        parts: Array<MultimodalPart>,
+        onToken: (String, Boolean) -> Unit,
+    ): Promise<Unit> {
+        val voidPromise = Promise<Unit>()
+        execute(parts, onToken)
+            .then { voidPromise.resolve(Unit) }
+            .catch { voidPromise.reject(it) }
+        return voidPromise
+    }
+
+    private class PreprocessedPart(
+        val type: PartType,
+        val text: String?,
+        val path: String?,
+        val bytes: ByteArray?
+    )
+
+    override fun execute(parts: Array<MultimodalPart>, onToken: ((token: String, done: Boolean) -> Unit)?): Promise<String> {
+        // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
+        val preprocessed = parts.map { part ->
+            val bytes = when (part.type) {
+                PartType.IMAGE -> part.imageBuffer?.let { buf ->
+                    val javaBuf = buf.getBuffer(false)
+                    val arr = ByteArray(javaBuf.remaining())
+                    javaBuf.get(arr)
+                    arr
+                }
+                PartType.AUDIO -> part.audioBuffer?.let { buf ->
+                    val javaBuf = buf.getBuffer(false)
+                    val arr = ByteArray(javaBuf.remaining())
+                    javaBuf.get(arr)
+                    arr
+                }
+                else -> null
+            }
+            PreprocessedPart(
+                type = part.type,
+                text = part.text,
+                path = part.path,
+                bytes = bytes
+            )
+        }
+
         return Promise.parallel {
             ensureLoaded()
-            val contents = mutableListOf<Content>()
-            var userTextRepresentation = ""
-            for (part in parts) {
-                when (part.type) {
-                    PartType.TEXT -> part.text?.let { 
-                        contents.add(Content.Text(it))
-                        userTextRepresentation += "$it "
+
+            val tempFiles = mutableListOf<java.io.File>()
+
+            try {
+                val contents = mutableListOf<Content>()
+                var userTextRepresentation = ""
+
+                for (part in preprocessed) {
+                    when (part.type) {
+                        PartType.TEXT -> part.text?.let {
+                            contents.add(Content.Text(it))
+                            userTextRepresentation += "$it "
+                        }
+                        PartType.IMAGE -> {
+                            val imagePath = when {
+                                part.path != null -> part.path
+                                part.bytes != null -> {
+                                    val tmp = java.io.File(
+                                        LiteRTLMInitProvider.applicationContext!!.cacheDir,
+                                        "litert_buf_${System.currentTimeMillis()}.jpg"
+                                    )
+                                    tmp.writeBytes(part.bytes)
+                                    tempFiles.add(tmp)
+                                    tmp.absolutePath
+                                }
+                                else -> null
+                            }
+                            if (imagePath != null) {
+                                val processedPath = resizeImageIfNeeded(imagePath)
+                                if (processedPath != imagePath) tempFiles.add(java.io.File(processedPath))
+                                contents.add(Content.ImageFile(processedPath))
+                                userTextRepresentation += "[Image] "
+                            }
+                        }
+                        PartType.AUDIO -> {
+                            val audioPath = when {
+                                part.path != null -> part.path
+                                part.bytes != null -> {
+                                    val tmp = java.io.File(
+                                        LiteRTLMInitProvider.applicationContext!!.cacheDir,
+                                        "litert_buf_${System.currentTimeMillis()}.wav"
+                                    )
+                                    tmp.writeBytes(part.bytes)
+                                    tempFiles.add(tmp)
+                                    tmp.absolutePath
+                                }
+                                else -> null
+                            }
+                            if (audioPath != null) {
+                                contents.add(Content.AudioFile(audioPath))
+                                userTextRepresentation += "[Audio] "
+                            }
+                        }
                     }
-                    PartType.IMAGE -> part.imageBuffer?.let { buffer ->
-                        val byteBuffer = buffer.getBuffer(false)
-                        val bytes = ByteArray(byteBuffer.remaining())
-                        byteBuffer.get(bytes)
-                        contents.add(Content.ImageBytes(bytes))
-                        userTextRepresentation += "[Image Buffer] "
+                }
+
+                userTextRepresentation = userTextRepresentation.trim()
+                history.add(Message(Role.USER, userTextRepresentation))
+
+                val userMsg = LiteRTMessage.user(Contents.of(contents))
+
+                if (onToken != null) {
+                    // ── Streaming path ────────────────────────────────────────────────
+                    val latch = CountDownLatch(1)
+                    val errorRef = AtomicReference<Throwable?>(null)
+                    val fullResponseBuilder = StringBuilder()
+
+                    val listener = StreamingCallbackListener(
+                        onToken = { token, done ->
+                            onToken(token, done)
+                            if (done) latch.countDown()
+                        },
+                        responseBuilder = fullResponseBuilder,
+                        history = history,
+                        userMessage = userTextRepresentation,
+                        onStatsReady = { stats -> lastStats = stats },
+                        onFailure = { e -> errorRef.set(e) }
+                    )
+
+                    try {
+                        conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "execute streaming failed", e)
+                        errorRef.set(e)
+                        onToken("Error: ${e.message}", true)
+                        latch.countDown()
                     }
-                    PartType.AUDIO -> part.audioBuffer?.let { buffer ->
-                        val byteBuffer = buffer.getBuffer(false)
-                        val bytes = ByteArray(byteBuffer.remaining())
-                        byteBuffer.get(bytes)
-                        contents.add(Content.AudioBytes(bytes))
-                        userTextRepresentation += "[Audio Buffer] "
+
+                    latch.await()
+                    errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
+                    fullResponseBuilder.toString()
+
+                } else {
+                    // ── Blocking path ─────────────────────────────────────────────────
+                    val startTime = System.nanoTime()
+                    val responseMsg = conversation!!.sendMessage(message = userMsg)
+                    val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
+
+                    val response = responseMsg.contents.contents
+                        .filterIsInstance<Content.Text>()
+                        .joinToString("") { it.text }
+
+                    history.add(Message(Role.MODEL, response))
+
+                    val promptTokens = userTextRepresentation.length / 4.0
+                    val completionTokens = response.length / 4.0
+                    lastStats = GenerationStats(
+                        promptTokens = promptTokens,
+                        completionTokens = completionTokens,
+                        totalTokens = promptTokens + completionTokens,
+                        timeToFirstToken = 0.0,
+                        totalTime = elapsedMs,
+                        tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
+                    )
+                    response
+                }
+            } finally {
+                // Clean up all temp files created during this execute call
+                for (f in tempFiles) {
+                    try { f.delete() } catch (e: Exception) {
+                        Log.w(TAG, "Failed to delete temp file: ${f.absolutePath}")
                     }
                 }
             }
-            userTextRepresentation = userTextRepresentation.trim()
-            history.add(Message(Role.USER, userTextRepresentation))
-
-            val userMsg = LiteRTMessage.user(Contents.of(contents))
-            val startTime = System.nanoTime()
-            val responseMsg = conversation!!.sendMessage(message = userMsg)
-            val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
-
-            val response = responseMsg.contents.contents
-                .filterIsInstance<Content.Text>()
-                .joinToString("") { it.text }
-
-            history.add(Message(Role.MODEL, response))
-            
-            val promptTokens = userTextRepresentation.length / 4.0
-            val completionTokens = response.length / 4.0
-            lastStats = GenerationStats(
-                promptTokens = promptTokens,
-                completionTokens = completionTokens,
-                totalTokens = promptTokens + completionTokens,
-                timeToFirstToken = 0.0,
-                totalTime = elapsedMs,
-                tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
-            )
-            response
         }
     }
 

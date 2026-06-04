@@ -33,8 +33,11 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
   it('should successfully proxy sendMessage and record memory metrics', async () => {
     const response = await llm.sendMessage("Test prompt");
 
-    expect(response).toBe("Mock response");
-    expect(mockLiteRTLM.sendMessage).toHaveBeenCalledWith("Test prompt");
+    expect(response).toBe("Mock token");
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
+      [{ type: "text", text: "Test prompt" }],
+      undefined,
+    );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
     expect(llm.memoryTracker?.getSnapshotCount()).toBe(1); // sendMessage records one
   });
@@ -52,7 +55,10 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
 
     expect(onToken).toHaveBeenCalledWith("Mock ", false);
     expect(onToken).toHaveBeenCalledWith("token", true);
-    expect(mockLiteRTLM.sendMessageAsync).toHaveBeenCalled();
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
+      [{ type: "text", text: "Async prompt" }],
+      expect.any(Function),
+    );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
 
@@ -62,10 +68,12 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
 
     expect(onToken).toHaveBeenCalledWith("Mock vision ", false);
     expect(onToken).toHaveBeenCalledWith("token", true);
-    expect(mockLiteRTLM.sendMessageWithImageAsync).toHaveBeenCalledWith(
-      "Vision prompt",
-      "/path/to/image.jpg",
-      expect.any(Function)
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
+      [
+        { type: "text", text: "Vision prompt" },
+        { type: "image", path: "/path/to/image.jpg" },
+      ],
+      expect.any(Function),
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
@@ -76,10 +84,12 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
 
     expect(onToken).toHaveBeenCalledWith("Mock audio ", false);
     expect(onToken).toHaveBeenCalledWith("token", true);
-    expect(mockLiteRTLM.sendMessageWithAudioAsync).toHaveBeenCalledWith(
-      "Audio prompt",
-      "/path/to/audio.wav",
-      expect.any(Function)
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
+      [
+        { type: "text", text: "Audio prompt" },
+        { type: "audio", path: "/path/to/audio.wav" },
+      ],
+      expect.any(Function),
     );
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });

@@ -109,7 +109,10 @@ describe('useModel React Hook Unit Tests', () => {
     });
 
     expect(response).toBe("Mock token");
-    expect(mockLiteRTLM.sendMessageAsync).toHaveBeenCalled();
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(
+      [{ type: "text", text: "Test prompt" }],
+      expect.any(Function),
+    );
     expect(hookResult.result.current.memorySummary).toBeDefined();
   });
 

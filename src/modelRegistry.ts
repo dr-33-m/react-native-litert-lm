@@ -1,5 +1,6 @@
 import { NitroModules } from "react-native-nitro-modules";
 import type { ModelStore, ModelFile } from "./specs/LiteRTLM.nitro";
+import { extractFileName, resolveModelFileName } from "./modelPath";
 
 export type { ModelFile } from "./specs/LiteRTLM.nitro";
 
@@ -9,12 +10,6 @@ export interface ModelDownloadOptions {
 }
 
 const nativeStore = NitroModules.createHybridObject<ModelStore>("ModelStore");
-
-function extractFileName(pathOrUrl: string): string {
-  const urlWithoutQuery = pathOrUrl.split("?")[0];
-  const name = urlWithoutQuery.split("/").pop();
-  return name || "model.bin";
-}
 
 /**
  * High-performance Model Registry for react-native-litert-lm.
@@ -31,8 +26,7 @@ export const ModelRegistry = {
    * @returns true if cached and has size > 0
    */
   isCached(pathOrUrl: string): boolean {
-    const fileName = pathOrUrl.includes("/") ? extractFileName(pathOrUrl) : pathOrUrl;
-    return nativeStore.isCached(fileName);
+    return nativeStore.isCached(resolveModelFileName(pathOrUrl));
   },
 
   /**
@@ -43,8 +37,7 @@ export const ModelRegistry = {
    * @returns The absolute local path
    */
   getFilePath(pathOrUrl: string): string {
-    const fileName = pathOrUrl.includes("/") ? extractFileName(pathOrUrl) : pathOrUrl;
-    return nativeStore.getFilePath(fileName);
+    return nativeStore.getFilePath(resolveModelFileName(pathOrUrl));
   },
 
   /**
@@ -63,8 +56,7 @@ export const ModelRegistry = {
    * @param pathOrUrl Filename, local path, or download URL to delete
    */
   deleteFile(pathOrUrl: string): void {
-    const fileName = pathOrUrl.includes("/") ? extractFileName(pathOrUrl) : pathOrUrl;
-    nativeStore.deleteFile(fileName);
+    nativeStore.deleteFile(resolveModelFileName(pathOrUrl));
   },
 
   /**

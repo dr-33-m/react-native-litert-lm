@@ -1,30 +1,84 @@
+import type { MultimodalPart } from "../specs/LiteRTLM.nitro";
+
+function streamMockTokens(
+  parts: MultimodalPart[],
+  onToken: (token: string, done: boolean) => void,
+): void {
+  const hasImage = parts.some((p) => p.type === "image");
+  const hasAudio = parts.some((p) => p.type === "audio");
+  if (hasImage) {
+    onToken("Mock vision ", false);
+    onToken("token", true);
+  } else if (hasAudio) {
+    onToken("Mock audio ", false);
+    onToken("token", true);
+  } else {
+    onToken("Mock ", false);
+    onToken("token", true);
+  }
+}
+
+function mockExecuteResponse(parts: MultimodalPart[]): string {
+  const hasImage = parts.some((p) => p.type === "image");
+  const hasAudio = parts.some((p) => p.type === "audio");
+  return hasImage
+    ? "Mock vision token"
+    : hasAudio
+      ? "Mock audio token"
+      : "Mock token";
+}
+
+const mockExecute = jest.fn(
+  (parts: MultimodalPart[], onToken?: (token: string, done: boolean) => void): Promise<string> => {
+    if (onToken) {
+      streamMockTokens(parts, onToken);
+    }
+    return Promise.resolve(mockExecuteResponse(parts));
+  },
+);
+
 export const mockLiteRTLM = {
   isReady: jest.fn(() => false),
   loadModel: jest.fn().mockResolvedValue(undefined),
-  sendMessage: jest.fn().mockResolvedValue("Mock response"),
-  sendMessageWithImage: jest.fn().mockResolvedValue("Mock vision response"),
-  downloadModel: jest.fn(async (url, fileName, onProgress) => {
+  execute: mockExecute,
+  sendMessage: jest.fn((message: string) =>
+    mockExecute([{ type: "text", text: message }]),
+  ),
+  sendMessageWithImage: jest.fn((message: string, imagePath: string) =>
+    mockExecute([
+      { type: "text", text: message },
+      { type: "image", path: imagePath },
+    ]),
+  ),
+  downloadModel: jest.fn(async (url: string, fileName: string, onProgress?: (progress: number) => void) => {
     onProgress?.(1.0);
     return "/mock/path/model.litertlm";
   }),
   deleteModel: jest.fn().mockResolvedValue(undefined),
-  sendMessageWithAudio: jest.fn().mockResolvedValue("Mock audio response"),
-  sendMultimodalMessage: jest.fn().mockResolvedValue("Mock multimodal response"),
-  sendMessageAsync: jest.fn((msg, onToken) => {
-    onToken("Mock ", false);
-    onToken("token", true);
-    return Promise.resolve();
-  }),
-  sendMessageWithImageAsync: jest.fn((msg, imagePath, onToken) => {
-    onToken("Mock vision ", false);
-    onToken("token", true);
-    return Promise.resolve();
-  }),
-  sendMessageWithAudioAsync: jest.fn((msg, audioPath, onToken) => {
-    onToken("Mock audio ", false);
-    onToken("token", true);
-    return Promise.resolve();
-  }),
+  sendMessageWithAudio: jest.fn((message: string, audioPath: string) =>
+    mockExecute([
+      { type: "text", text: message },
+      { type: "audio", path: audioPath },
+    ]),
+  ),
+  sendMultimodalMessage: jest.fn((parts: MultimodalPart[]) => mockExecute(parts)),
+  sendMessageAsync: jest.fn((msg: string, onToken: (token: string, done: boolean) => void) =>
+    mockExecute([{ type: "text", text: msg }], onToken).then(() => {}),
+  ),
+  sendMessageWithImageAsync: jest.fn(
+    (msg: string, imagePath: string, onToken: (token: string, done: boolean) => void) =>
+      mockExecute(
+        [{ type: "text", text: msg }, { type: "image", path: imagePath }],
+        onToken,
+      ).then(() => {}),
+  ),
+  sendMessageWithAudioAsync: jest.fn(
+    (msg: string, audioPath: string, onToken: (token: string, done: boolean) => void) =>
+      mockExecute(
+        [{ type: "text", text: msg }, { type: "audio", path: audioPath }],
+        onToken,
+      ).then(() => {}),
+  ),
   getHistory: jest.fn(() => []),
   resetConversation: jest.fn(),
   getStats: jest.fn(() => ({
@@ -46,15 +100,20 @@ export const mockLiteRTLM = {
 };
 
 export const mockModelStore = {
-  isCached: jest.fn((fileName) => false),
-  getFilePath: jest.fn((fileName) => `/mock/path/${fileName}`),
+  isCached: jest.fn((fileName: string) => false),
+  getFilePath: jest.fn((fileName: string) => `/mock/path/${fileName}`),
   listCachedFiles: jest.fn(() => []),
-  deleteFile: jest.fn((fileName) => {
+  deleteFile: jest.fn((fileName: string) => {
     return mockLiteRTLM.deleteModel(fileName);
   }),
-  downloadFile: jest.fn(async (url, fileName, headersJson, onProgress) => {
-    return mockLiteRTLM.downloadModel(url, fileName, onProgress);
-  }),
+  downloadFile: jest.fn(
+    async (
+      url: string,
+      fileName: string,
+      headersJson: string,
+      onProgress: (progress: number) => void,
+    ) => mockLiteRTLM.downloadModel(url, fileName, onProgress),
+  ),
 };
 
 export const NitroModules = {

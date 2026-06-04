@@ -1,7 +1,12 @@
 import { NitroModules } from "react-native-nitro-modules";
-import { LiteRTLM, LLMConfig } from "./specs/LiteRTLM.nitro";
+import { LiteRTLM, LLMConfig, MultimodalPart } from "./specs/LiteRTLM.nitro";
 import { createMemoryTracker, MemoryTracker } from "./memoryTracker";
 import { ModelRegistry } from "./modelRegistry";
+import {
+  isLegacyInferenceMethod,
+  routeLegacyInference,
+  TokenCallback,
+} from "./inferenceRouting";
 
 /**
  * Extended LiteRT-LM instance with optional memory tracking and
@@ -37,9 +42,6 @@ export function createLLM(options?: {
     ? createMemoryTracker(options?.maxMemorySnapshots ?? 256)
     : undefined;
 
-  /**
-   * Record a real memory snapshot using OS-level APIs via getMemoryUsage().
-   */
   const recordMemorySnapshot = () => {
     if (!tracker) return;
     try {
@@ -51,7 +53,7 @@ export function createLLM(options?: {
         availableMemoryBytes: usage.availableMemoryBytes,
       });
     } catch {
-      // Ignore errors during memory tracking - it's non-critical
+      // Non-critical
     }
   };
 
@@ -68,7 +70,6 @@ export function createLLM(options?: {
 
     const result = await native.loadModel(modelPath, config);
 
-    // Record initial memory snapshot after model load
     if (tracker) {
       tracker.reset();
       recordMemorySnapshot();
@@ -77,70 +78,61 @@ export function createLLM(options?: {
     return result;
   };
 
-  const SNAPSHOT_TRIGGERS = new Set([
-    "sendMessage",
-    "sendMessageWithImage",
-    "sendMessageWithAudio",
-    "resetConversation",
-  ]);
+  /** Single JS inference path — always calls native execute(). */
+  const runExecute = (
+    parts: MultimodalPart[],
+    onToken?: TokenCallback,
+  ): Promise<string> => {
+    if (onToken) {
+      const wrapped: TokenCallback = (token, done) => {
+        onToken(token, done);
+        if (done) recordMemorySnapshot();
+      };
+      return native.execute(parts, wrapped);
+    }
+    return native.execute(parts, undefined).then((result: string) => {
+      recordMemorySnapshot();
+      return result;
+    });
+  };
 
   return new Proxy(native, {
     get(target, prop, receiver) {
+      if (typeof prop !== "string") {
+        return Reflect.get(target, prop, receiver);
+      }
+
       if (prop === "memoryTracker") {
         return tracker;
       }
       if (prop === "loadModel") {
         return augmentedLoadModel;
       }
-
-      const original = Reflect.get(target, prop, receiver);
-      if (typeof original !== "function") {
-        return original;
+      if (prop === "execute") {
+        return (parts: MultimodalPart[], onToken?: TokenCallback) =>
+          runExecute(parts, onToken);
       }
-
-      if (prop === "sendMessageAsync") {
-        return (message: string, onToken: (token: string, done: boolean) => void) => {
-          return original.call(target, message, (token: string, done: boolean) => {
-            onToken(token, done);
-            if (done) {
-              recordMemorySnapshot();
-            }
-          });
-        };
-      }
-
-      if (prop === "sendMessageWithImageAsync") {
-        return (message: string, imagePath: string, onToken: (token: string, done: boolean) => void) => {
-          return original.call(target, message, imagePath, (token: string, done: boolean) => {
-            onToken(token, done);
-            if (done) {
-              recordMemorySnapshot();
-            }
-          });
-        };
-      }
-
-      if (prop === "sendMessageWithAudioAsync") {
-        return (message: string, audioPath: string, onToken: (token: string, done: boolean) => void) => {
-          return original.call(target, message, audioPath, (token: string, done: boolean) => {
-            onToken(token, done);
-            if (done) {
-              recordMemorySnapshot();
-            }
-          });
-        };
-      }
-
-      if (SNAPSHOT_TRIGGERS.has(prop as string)) {
-        return async (...args: any[]) => {
-          const result = await original.apply(target, args);
+      if (prop === "resetConversation") {
+        return () => {
+          const result = target.resetConversation();
           recordMemorySnapshot();
           return result;
         };
       }
 
-      return original.bind(target);
+      if (isLegacyInferenceMethod(prop)) {
+        return (...args: unknown[]) => {
+          const route = routeLegacyInference(prop, args)!;
+          const promise = runExecute(route.parts, route.onToken);
+          return prop.endsWith("Async") ? promise.then(() => {}) : promise;
+        };
+      }
+
+      const original = target[prop as keyof LiteRTLM];
+      if (typeof original === "function") {
+        return original.bind(target);
+      }
+      return original;
     },
   }) as unknown as LiteRTLMInstance;
 }
-

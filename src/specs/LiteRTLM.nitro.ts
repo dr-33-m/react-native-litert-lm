@@ -42,6 +42,8 @@ export interface MultimodalPart {
   type: PartType;
   /** The plain text content, if type is 'text' */
   text?: string;
+  /** Local filesystem path to an image or audio file, if type is 'image' or 'audio' */
+  path?: string;
   /** Raw image binary data, if type is 'image' (zero-copy ArrayBuffer mapping) */
   imageBuffer?: ArrayBuffer;
   /** Raw audio binary data, if type is 'audio' (zero-copy ArrayBuffer mapping) */
@@ -323,6 +325,23 @@ export interface LiteRTLM extends HybridObject<{
    * Uses OS-level APIs to report actual memory consumption.
    */
   getMemoryUsage(): MemoryUsage;
+
+  /**
+   * Execute a unified multimodal inference request.
+   *
+   * A single deep entry point that replaces all modalality-specific send methods.
+   * Accepts text, image (path or buffer), and audio (path or buffer) parts.
+   * When onToken is provided, streams tokens incrementally; otherwise resolves
+   * with the complete response.
+   *
+   * @param parts Array of content parts (text, image, audio)
+   * @param onToken Optional streaming callback - invoked per token with (token, isDone)
+   * @returns Promise resolving to the full response string
+   */
+  execute(
+    parts: MultimodalPart[],
+    onToken?: (token: string, done: boolean) => void,
+  ): Promise<string>;
 
   /**
    * Release all native resources.

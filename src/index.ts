@@ -18,6 +18,9 @@ export type {
   Role,
   GenerationStats,
   MemoryUsage,
+  /** New in v0.5: pass to execute() instead of individual send methods */
+  MultimodalPart,
+  PartType,
 } from "./specs/LiteRTLM.nitro";
 
 
@@ -41,29 +44,29 @@ export * from "./hooks";
  * ```typescript
  * import { createLLM } from 'react-native-litert-lm';
  *
- * // Basic usage with Gemma 3n
  * const llm = createLLM();
- * llm.loadModel('/path/to/gemma-3n-e2b.litertlm', {
- *   backend: 'gpu',
- *   temperature: 0.7,
- *   maxTokens: 512
- * });
+ * await llm.loadModel('/path/to/gemma-3n-e2b.litertlm', { backend: 'gpu' });
  *
- * // Simple text generation
- * const response = llm.sendMessage('Hello, how are you?');
- * console.log(response);
+ * // ── Unified entry point (recommended) ─────────────────────────────────────
+ * // Blocking text
+ * const response = await llm.execute([{ type: 'text', text: 'Hello!' }]);
  *
- * // Streaming generation
- * llm.sendMessageAsync('Tell me about React Native', (token, done) => {
- *   process.stdout.write(token);
- *   if (done) console.log('\n--- Done ---');
- * });
+ * // Streaming text
+ * await llm.execute(
+ *   [{ type: 'text', text: 'Write me a haiku' }],
+ *   (token, done) => { process.stdout.write(token); }
+ * );
  *
- * // Check stats
- * const stats = llm.getStats();
- * console.log(`Generated at ${stats.tokensPerSecond} tokens/sec`);
+ * // Multimodal (image path — auto-scaled to 1024px on both platforms)
+ * const desc = await llm.execute([
+ *   { type: 'text', text: 'Describe this image' },
+ *   { type: 'image', path: '/path/to/photo.jpg' },
+ * ]);
  *
- * // Cleanup
+ * // ── Legacy methods (still fully supported) ────────────────────────────────
+ * const r = await llm.sendMessage('Hello');
+ * llm.sendMessageAsync('Stream this', (t, done) => console.log(t));
+ *
  * llm.close();
  * ```
  */
