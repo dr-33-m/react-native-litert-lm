@@ -35,10 +35,13 @@ jobs:
   analyze-android:
     name: Analyze Android (Java/Kotlin)
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       security-events: write
       actions: read
       contents: read
+    env:
+      SKIP_IOS_FRAMEWORK_DOWNLOAD: '1'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -80,6 +83,7 @@ jobs:
   analyze-ios:
     name: Analyze iOS (Swift)
     runs-on: macos-15
+    timeout-minutes: 90
     permissions:
       security-events: write
       actions: read
@@ -102,11 +106,6 @@ jobs:
           npm install
           npx expo prebuild --clean --platform ios
 
-      - name: Install CocoaPods
-        run: |
-          cd example/ios
-          pod install
-
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v4
         with:
@@ -115,7 +114,14 @@ jobs:
 
       - name: Build iOS library
         run: |
-          xcodebuild -workspace example/ios/LiteRTChat.xcworkspace \
+          WORKSPACE=$(find example/ios -name "*.xcworkspace" -maxdepth 1 | head -1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "Error: No .xcworkspace found in example/ios/"
+            ls -la example/ios/
+            exit 1
+          fi
+          echo "Building with workspace: $WORKSPACE"
+          xcodebuild -workspace "$WORKSPACE" \
             -scheme react-native-litert-lm \
             -sdk iphonesimulator \
             -configuration Debug \
