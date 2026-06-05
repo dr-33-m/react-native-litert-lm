@@ -79,7 +79,7 @@ jobs:
 
   analyze-ios:
     name: Analyze iOS (Swift)
-    runs-on: macos-14
+    runs-on: macos-15
     permissions:
       security-events: write
       actions: read
