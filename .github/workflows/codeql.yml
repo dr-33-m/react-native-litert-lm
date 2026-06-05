@@ -24,13 +24,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
   analyze-android:
     name: Analyze Android (Java/Kotlin)
@@ -55,14 +55,16 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Install dependencies and generate native projects
         run: |
           npm install
           npm run specs
-          cd example && npm install
+          cd example
+          npm install
+          npx expo prebuild --clean --platform android
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: java-kotlin
           build-mode: manual
@@ -73,7 +75,7 @@ jobs:
           ./gradlew :react-native-litert-lm:assembleDebug --no-daemon
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
 
   analyze-ios:
     name: Analyze iOS (Swift)
@@ -92,11 +94,13 @@ jobs:
           node-version: '22'
           cache: 'npm'
 
-      - name: Install dependencies and generate specs
+      - name: Install dependencies and generate native projects
         run: |
           npm install
           npm run specs
-          cd example && npm install
+          cd example
+          npm install
+          npx expo prebuild --clean --platform ios
 
       - name: Install CocoaPods
         run: |
@@ -104,7 +108,7 @@ jobs:
           pod install
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: swift
           build-mode: manual
@@ -118,4 +122,4 @@ jobs:
             build
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
