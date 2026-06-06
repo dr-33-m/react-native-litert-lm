@@ -31,10 +31,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.ToolProvider
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
+
 
 
 // Alias to avoid confusion with our generated Message type
@@ -216,13 +213,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
                 }
     
-                // Whether to run engine validation after loading
-                val shouldValidate = config?.validate?: false
-    
                 try {
-                    // Early GPU hardware check: probe for OpenCL library before
-                    // spending time on engine creation. LiteRT-LM's GPU delegate
-                    // requires OpenCL, which is absent on most Samsung/Qualcomm devices.
+                    // Early GPU hardware check: probe for OpenCL library.
+                    // LiteRT-LM's GPU delegate requires OpenCL, which is absent on
+                    // most Samsung/Qualcomm devices. Log a warning — fallback will
+                    // handle it gracefully below.
                     if (backend == Backend.GPU) {
                         val hasOpenCL = openCLAvailable ?: run {
                             val result = try {
@@ -241,12 +236,57 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             result
                         }
                         if (!hasOpenCL) {
-                            throw RuntimeException(
-                                "GPU backend is not supported on this device (OpenCL library not found). " +
-                                "Please use CPU backend instead."
-                            )
+                            Log.w(TAG, "OpenCL library not found — GPU backend will likely fail, fallback chain will attempt CPU")
+                        } else {
+                            Log.i(TAG, "OpenCL library found — GPU backend is available")
                         }
-                        Log.i(TAG, "OpenCL library found — GPU backend is available")
+                    }
+
+                    // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
+                    // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
+                    // Passing vision/audio backends to a text-only model causes
+                    // vision_litert_compiled_model_executor init failures.
+                    val modelFileName = modelPath.substringAfterLast("/").lowercase()
+                    val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
+    
+                    // Get cache directory from application context
+                    val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
+                    Log.i(TAG, "Using cache directory: $cacheDirectory")
+
+                    if (enableSpeculativeDecoding) {
+                        @OptIn(ExperimentalApi::class)
+                        ExperimentalFlags.enableSpeculativeDecoding = true
+                    }
+
+                    // Helper: attempt engine creation with given backends, return null on failure
+                    fun tryCreateEngine(
+                        mainBackend: com.google.ai.edge.litertlm.Backend,
+                        visionBackend: com.google.ai.edge.litertlm.Backend?,
+                        audioBackend: com.google.ai.edge.litertlm.Backend?
+                    ): Engine? {
+                        return try {
+                            val cfg = if (visionBackend != null && audioBackend != null) {
+                                EngineConfig(
+                                    modelPath = modelPath,
+                                    backend = mainBackend,
+                                    visionBackend = visionBackend,
+                                    audioBackend = audioBackend,
+                                    maxNumTokens = maxContextTokens,
+                                    cacheDir = cacheDirectory
+                                )
+                            } else {
+                                EngineConfig(
+                                    modelPath = modelPath,
+                                    backend = mainBackend,
+                                    maxNumTokens = maxContextTokens,
+                                    cacheDir = cacheDirectory
+                                )
+                            }
+                            Engine(cfg).also { it.initialize() }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
+                            null
+                        }
                     }
 
                     // Map our Backend enum to LiteRT-LM Backend sealed class
@@ -258,69 +298,61 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         }
                         else -> com.google.ai.edge.litertlm.Backend.CPU()
                     }
-                    
-                    // Detect multimodal support. Check config.multimodal flag first, then fall back to filename sniffing.
-                    // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
-                    // Passing vision/audio backends to a text-only model causes
-                    // vision_litert_compiled_model_executor init failures.
-                    val modelFileName = modelPath.substringAfterLast("/").lowercase()
-                    val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
-    
+
                     val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
                     val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
     
                     Log.i(TAG, "Backend config: main=$lmBackend, vision=$lmVisionBackend, audio=$lmAudioBackend, multimodal=$isMultimodal")
     
-                    // Get cache directory from application context
-                    val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
-                    Log.i(TAG, "Using cache directory: $cacheDirectory")
-    
-                    // Create Engine configuration — visionBackend/audioBackend are optional
-                    val engineConfig = if (isMultimodal) {
-                        EngineConfig(
-                            modelPath = modelPath,
-                            backend = lmBackend,
-                            visionBackend = lmVisionBackend!!,
-                            audioBackend = lmAudioBackend!!,
-                            maxNumTokens = maxContextTokens,
-                            cacheDir = cacheDirectory
-                        )
-                    } else {
-                        EngineConfig(
-                            modelPath = modelPath,
-                            backend = lmBackend,
-                            maxNumTokens = maxContextTokens,
-                            cacheDir = cacheDirectory
-                        )
-                    }
-    
                     if (isClosed) return@synchronized
-                    
-                    if (enableSpeculativeDecoding) {
-                        @OptIn(ExperimentalApi::class)
-                        ExperimentalFlags.enableSpeculativeDecoding = true
+
+                    // Attempt primary backend
+                    var eng = tryCreateEngine(lmBackend, lmVisionBackend, lmAudioBackend)
+
+                    // Fallback sequence if GPU/NPU fails to initialize (mirrors iOS behavior)
+                    if (eng == null && backend != Backend.CPU) {
+                        val requestedName = if (backend == Backend.GPU) "GPU" else "NPU"
+                        Log.w(TAG, "$requestedName backend failed — trying fallback chain...")
+
+                        // Fallback 1: CPU main + GPU vision + CPU audio
+                        eng = tryCreateEngine(
+                            com.google.ai.edge.litertlm.Backend.CPU(),
+                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
+                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
+                        )
+
+                        // Fallback 2: Full CPU for all modalities
+                        if (eng == null) {
+                            eng = tryCreateEngine(
+                                com.google.ai.edge.litertlm.Backend.CPU(),
+                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
+                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
+                            )
+                        }
+
+                        // Fallback 3: Text-only CPU (no vision/audio executors)
+                        if (eng == null) {
+                            eng = tryCreateEngine(
+                                com.google.ai.edge.litertlm.Backend.CPU(),
+                                null,
+                                null
+                            )
+                        }
+
+                        if (eng != null) {
+                            Log.w(TAG, "$requestedName backend unavailable — fell back to CPU successfully")
+                            backend = Backend.CPU
+                        }
                     }
 
-                    // Initialize Engine
-                    engine = Engine(engineConfig).also { it.initialize() }
+                    engine = eng ?: throw RuntimeException(
+                        "Failed to create LiteRT-LM engine. Tried primary backend and all CPU fallbacks."
+                    )
                     Log.i(TAG, "Engine created and initialized successfully")
     
                     // Create Conversation
                     createNewConversation()
                     Log.i(TAG, "Conversation created successfully")
-
-                    // Validate the engine actually works with a quick test inference.
-                    // GPU/NPU backends can initialize without error but silently fail to
-                    // produce tokens — enabling this catches those failures at load time.
-                    // CPU is always reliable so validation is never run on it, even when
-                    // the `validate` flag is set.
-                    if (shouldValidate) {
-                        if (backend == Backend.GPU || backend == Backend.NPU) {
-                            validateEngine()
-                        } else {
-                            Log.i(TAG, "Validation skipped: CPU backend is always reliable")
-                        }
-                    }
     
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to load model: ${e.message}", e)
@@ -921,77 +953,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         conversation = engine!!.createConversation(convConfig)
     }
 
-    /**
-     * Validate that the engine can actually produce inference output.
-     *
-     * Some GPU backends initialize without error but silently hang during inference.
-     * This sends a minimal test prompt ("Hi") and waits up to 30s for any token.
-     * If no token arrives, we throw so the model does NOT appear as loaded.
-     */
-    private fun validateEngine() {
-        val backendName = when (backend) {
-            Backend.GPU -> "GPU"
-            Backend.NPU -> "NPU"
-            else -> "CPU"
-        }
-        Log.i(TAG, "Validating $backendName backend with test inference...")
 
-        val latch = CountDownLatch(1)
-        val gotToken = AtomicBoolean(false)
-        val errorRef = AtomicReference<String?>(null)
-
-        // Use the existing conversation for validation (single-session constraint).
-        val validationConv = conversation
-            ?: throw RuntimeException("$backendName backend: no conversation available for validation")
-
-        try {
-            val testMsg = LiteRTMessage.user("Hi")
-            validationConv.sendMessageAsync(
-                message = testMsg,
-                callback = object : com.google.ai.edge.litertlm.MessageCallback {
-                    override fun onMessage(msg: com.google.ai.edge.litertlm.Message) {
-                        gotToken.set(true)
-                        latch.countDown()
-                    }
-                    override fun onDone() {
-                        latch.countDown()
-                    }
-                    override fun onError(t: Throwable) {
-                        errorRef.set(t.message)
-                        latch.countDown()
-                    }
-                }
-            )
-        } catch (e: Exception) {
-            throw RuntimeException(
-                "$backendName backend failed to run inference: ${e.message}. " +
-                "This device may not support the $backendName backend. Please try CPU.",
-                e
-            )
-        }
-
-        // Wait up to 30s for any response
-        val completed = latch.await(30, TimeUnit.SECONDS)
-
-        val error = errorRef.get()
-        if (error != null) {
-            throw RuntimeException(
-                "$backendName backend inference error: $error. " +
-                "This device may not support the $backendName backend. Please try CPU."
-            )
-        }
-        if (!completed || !gotToken.get()) {
-            throw RuntimeException(
-                "$backendName backend produced no response within 30 seconds. " +
-                "This device may not support the $backendName backend. Please try CPU."
-            )
-        }
-
-        Log.i(TAG, "$backendName backend validated successfully")
-
-        // Re-create the real conversation (validation consumed one turn)
-        createNewConversation()
-    }
 
     override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<String> {
         return Promise.parallel {

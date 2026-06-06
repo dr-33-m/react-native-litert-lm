@@ -259,6 +259,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             
             // Fallback sequence if GPU/NPU fails to initialize
             if rawEngine == nil && mainBackendStr != "cpu" {
+                NSLog("[LiteRTLM] %@ backend failed — trying fallback chain...", mainBackendStr.uppercased())
+                
                 // Fallback 1: CPU execution with GPU acceleration for heavy Vision parameters
                 rawEngine = createEngine("cpu", "gpu", "cpu")
                 
@@ -273,6 +275,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 }
                 
                 if rawEngine != nil {
+                    NSLog("[LiteRTLM] %@ backend unavailable — fell back to CPU successfully", mainBackendStr.uppercased())
                     self.backend = .cpu
                 }
             }

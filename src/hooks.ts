@@ -81,7 +81,6 @@ export function useModel(
   const temperature = config?.temperature;
   const topK = config?.topK;
   const topP = config?.topP;
-  const validate = config?.validate;
   const multimodal = config?.multimodal;
   const tools = config?.tools;
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
@@ -98,7 +97,6 @@ export function useModel(
       ...(temperature !== undefined && { temperature }),
       ...(topK !== undefined && { topK }),
       ...(topP !== undefined && { topP }),
-      ...(validate !== undefined && { validate }),
       ...(multimodal !== undefined && { multimodal }),
       ...(tools !== undefined && { tools }),
       ...(enableSpeculativeDecoding !== undefined && {
@@ -114,7 +112,6 @@ export function useModel(
       temperature,
       topK,
       topP,
-      validate,
       multimodal,
       toolsKey,
       enableSpeculativeDecoding,

@@ -130,7 +130,7 @@ export function checkBackendSupport(backend: Backend): string | undefined {
     if (Platform.OS === "android") {
       // LiteRT-LM GPU delegate requires OpenCL, which is unavailable
       // on most Samsung/Qualcomm devices. Only Pixel devices reliably expose it.
-      return "GPU backend requires OpenCL support, which is unavailable on most Samsung and Qualcomm devices.";
+      return "GPU backend requires OpenCL support, which is unavailable on most Samsung and Qualcomm devices. Will automatically fall back to CPU if unavailable.";
     }
     // iOS always supports GPU via Metal
     return undefined;
@@ -138,10 +138,10 @@ export function checkBackendSupport(backend: Backend): string | undefined {
 
   if (backend === "npu") {
     if (Platform.OS === "android") {
-      return "NPU backend requires compatible hardware (Qualcomm Hexagon, MediaTek APU, etc.). Will fall back to GPU if unavailable.";
+      return "NPU backend requires compatible hardware (Qualcomm Hexagon, MediaTek APU, etc.). Will automatically fall back to CPU if unavailable.";
     }
     if (Platform.OS === "ios") {
-      return "NPU (Neural Engine) is not yet supported on iOS. Use 'gpu' (Metal) or 'cpu' instead.";
+      return "NPU (Neural Engine) is not yet supported on iOS. Mapped to GPU (Metal) internally.";
     }
   }
 
