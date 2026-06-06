@@ -10,6 +10,8 @@ import android.os.Debug
 import android.app.ActivityManager
 import android.content.Context
 import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
 import dev.litert.litertlm.LiteRTLMInitProvider
