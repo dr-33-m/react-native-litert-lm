@@ -169,7 +169,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var temperature: Double = 0.7
     private var topK: Int = 40
     private var topP: Double = 0.95
-    private var maxTokens: Int = 1024
+    private var maxContextTokens: Int = 4096
+    private var maxOutputTokens: Int = 1024
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
@@ -200,7 +201,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.temperature?.let { temperature = it }
                     cfg.topK?.let { topK = it.toInt() }
                     cfg.topP?.let { topP = it }
-                    cfg.maxTokens?.let { maxTokens = it.toInt() }
+                    // New split fields take priority over legacy maxTokens
+                    cfg.maxContextTokens?.let { maxContextTokens = it.toInt() }
+                    cfg.maxOutputTokens?.let { maxOutputTokens = it.toInt() }
+                    // Legacy: if only maxTokens is set, map to both for backward compat
+                    if (cfg.maxContextTokens == null && cfg.maxOutputTokens == null) {
+                        cfg.maxTokens?.let {
+                            maxContextTokens = it.toInt()
+                            maxOutputTokens = it.toInt()
+                        }
+                    }
                     cfg.systemPrompt?.let { systemPrompt = it }
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
@@ -272,14 +282,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             backend = lmBackend,
                             visionBackend = lmVisionBackend!!,
                             audioBackend = lmAudioBackend!!,
-                            maxNumTokens = maxTokens,
+                            maxNumTokens = maxContextTokens,
                             cacheDir = cacheDirectory
                         )
                     } else {
                         EngineConfig(
                             modelPath = modelPath,
                             backend = lmBackend,
-                            maxNumTokens = maxTokens,
+                            maxNumTokens = maxContextTokens,
                             cacheDir = cacheDirectory
                         )
                     }
@@ -897,6 +907,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
             tools = lmTools ?: emptyList()
         )
+        // TODO: maxOutputTokens is not configurable on Android — the Kotlin SDK's
+        // ConversationConfig does not expose this parameter. Only EngineConfig.maxNumTokens
+        // (context budget) is supported. maxOutputTokens is effective on iOS only.
+        //
+        // Upstream is actively adding max_output_tokens across API surfaces:
+        //   - C API:    PR #2470 (merged 2026-06-04)
+        //   - Python:   PR #2476 (merged 2026-06-04)
+        //   - OpenAI:   PR #2433 (in progress)
+        //   - Kotlin:   Not yet available — track at https://github.com/google-ai-edge/LiteRT-LM
+        //
+        // Once the Kotlin SDK exposes this, wire it via ConversationConfig here.
         conversation = engine!!.createConversation(convConfig)
     }
 

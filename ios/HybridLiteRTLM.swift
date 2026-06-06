@@ -74,7 +74,8 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var temperature: Double = 0.7
     private var topK: Int = 40
     private var topP: Double = 0.95
-    private var maxTokens: Int = 1024
+    private var maxContextTokens: Int = 4096
+    private var maxOutputTokens: Int = 1024
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
     private var enableSpeculativeDecoding: Bool = false
@@ -186,7 +187,15 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let t = config.temperature { self.temperature = t }
                 if let k = config.topK { self.topK = Int(k) }
                 if let p = config.topP { self.topP = p }
-                if let m = config.maxTokens { self.maxTokens = Int(m) }
+                // New split fields take priority over legacy maxTokens
+                if let ctx = config.maxContextTokens { self.maxContextTokens = Int(ctx) }
+                if let out = config.maxOutputTokens { self.maxOutputTokens = Int(out) }
+                // Legacy: if only maxTokens is set, map to both for backward compat
+                if config.maxContextTokens == nil && config.maxOutputTokens == nil,
+                   let m = config.maxTokens {
+                    self.maxContextTokens = Int(m)
+                    self.maxOutputTokens = Int(m)
+                }
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
                 self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
@@ -223,7 +232,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 guard let s = settings else { return nil }
                 defer { litert_lm_engine_settings_delete(s) }
                 
-                litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxTokens))
+                litert_lm_engine_settings_set_max_num_tokens(s, Int32(self.maxContextTokens))
                 litert_lm_engine_settings_enable_benchmark(s)
                 
                 if self.enableSpeculativeDecoding {
@@ -904,7 +913,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
             defer { litert_lm_session_config_delete(sessionConfig) }
             
-            litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxTokens))
+            litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
             
             var sampler = LiteRtLmSamplerParams()
             sampler.type = kLiteRtLmSamplerTypeTopP
@@ -1174,7 +1183,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         guard let sessionConfig = litert_lm_session_config_create() else { return }
         defer { litert_lm_session_config_delete(sessionConfig) }
         
-        litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxTokens))
+        litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
         
         var sampler = LiteRtLmSamplerParams()
         sampler.type = kLiteRtLmSamplerTypeTopP

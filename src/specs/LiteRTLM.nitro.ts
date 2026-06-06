@@ -77,7 +77,30 @@ export interface LLMConfig {
   backend?: Backend;
 
   /**
+   * Total engine KV-cache budget in tokens (prompt + history + output combined).
+   * Must be ≥ the total number of input tokens + desired output tokens.
+   * For compiled bundles, should not exceed the bundle's compiled cache_length.
+   * @default 4096
+   */
+  maxContextTokens?: number;
+
+  /**
+   * Maximum number of tokens the model generates per response.
+   * For compiled bundles, must not exceed the bundle's compiled decode-chunk size.
+   *
+   * @remarks
+   * **iOS only** — the Android Kotlin SDK does not currently expose per-session
+   * output token control. On Android this value is accepted but has no effect;
+   * the engine uses its own default.
+   *
+   * @default 1024
+   */
+  maxOutputTokens?: number;
+
+  /**
    * Maximum number of tokens to generate.
+   * @deprecated Use `maxContextTokens` and `maxOutputTokens` instead.
+   * When set alone (without the new fields), maps to both for backward compatibility.
    * @default 1024
    */
   maxTokens?: number;

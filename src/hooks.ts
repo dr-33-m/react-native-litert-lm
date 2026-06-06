@@ -76,6 +76,8 @@ export function useModel(
   const backend = config?.backend;
   const systemPrompt = config?.systemPrompt;
   const maxTokens = config?.maxTokens;
+  const maxContextTokens = config?.maxContextTokens;
+  const maxOutputTokens = config?.maxOutputTokens;
   const temperature = config?.temperature;
   const topK = config?.topK;
   const topP = config?.topP;
@@ -91,6 +93,8 @@ export function useModel(
       ...(backend !== undefined && { backend }),
       ...(systemPrompt !== undefined && { systemPrompt }),
       ...(maxTokens !== undefined && { maxTokens }),
+      ...(maxContextTokens !== undefined && { maxContextTokens }),
+      ...(maxOutputTokens !== undefined && { maxOutputTokens }),
       ...(temperature !== undefined && { temperature }),
       ...(topK !== undefined && { topK }),
       ...(topP !== undefined && { topP }),
@@ -105,6 +109,8 @@ export function useModel(
       backend,
       systemPrompt,
       maxTokens,
+      maxContextTokens,
+      maxOutputTokens,
       temperature,
       topK,
       topP,

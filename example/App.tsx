@@ -112,7 +112,8 @@ function Main() {
     () => ({
       backend,
       systemPrompt: "You are a helpful assistant. Keep responses concise.",
-      maxTokens: 1024,
+      maxContextTokens: 4096,
+      maxOutputTokens: 1024,
       autoLoad: false,
       enableMemoryTracking: true,
       maxMemorySnapshots: 100,

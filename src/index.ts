@@ -44,7 +44,8 @@ export * from "./hooks";
  * llm.loadModel('/path/to/gemma-3n-e2b.litertlm', {
  *   backend: 'gpu',
  *   temperature: 0.7,
- *   maxTokens: 512
+ *   maxContextTokens: 4096,
+ *   maxOutputTokens: 512
  * });
  *
  * // Simple text generation
