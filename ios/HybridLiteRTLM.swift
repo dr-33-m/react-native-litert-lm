@@ -218,7 +218,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             rawEngine = createEngine(mainBackendStr, visionBackend, audioBackend)
             
             // Fallback sequence if GPU/NPU fails to initialize
-            if rawEngine == nil && mainBackendStr != "cpu" {
+            if rawEngine == nil {
                 // Fallback 1: CPU execution with GPU acceleration for heavy Vision parameters
                 rawEngine = createEngine("cpu", "gpu", "cpu")
                 
