@@ -102,4 +102,21 @@ class HybridLiteRTLMTest {
         assertEquals(0.0, stats.totalTime, 0.0)
         assertEquals(0.0, stats.tokensPerSecond, 0.0)
     }
+
+    @Test
+    fun testDeleteModelCleanupLogic() {
+        val loadedPathField = HybridLiteRTLM::class.java.getDeclaredField("loadedModelPath")
+        loadedPathField.isAccessible = true
+        loadedPathField.set(bridge, "/path/to/my_loaded_model.litertlm")
+
+        val promise1 = bridge.deleteModel("other_model.litertlm")
+        assertNotNull(promise1)
+        while (!promise1.isCompleted) { Thread.sleep(10) }
+        assertEquals("/path/to/my_loaded_model.litertlm", loadedPathField.get(bridge))
+
+        val promise2 = bridge.deleteModel("my_loaded_model.litertlm")
+        assertNotNull(promise2)
+        while (!promise2.isCompleted) { Thread.sleep(10) }
+        assertNull(loadedPathField.get(bridge))
+    }
 }

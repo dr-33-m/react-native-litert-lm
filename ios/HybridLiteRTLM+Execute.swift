@@ -127,29 +127,34 @@ extension HybridLiteRTLM {
         var descs: [Desc] = []
         var temps: [String] = []
 
-        for part in preprocessed {
-            switch part.kind {
-            case .text(let text):
-                descs.append(Desc(kind: "text", text: text, file: nil))
-            case .imagePath(let path):
-                try validateMediaPath(path, label: "Image")
-                let scaled = scaleImageIfNeeded(path)
-                if scaled != path { temps.append(scaled) }
-                descs.append(Desc(kind: "image", text: nil, file: scaled))
-            case .imageData(let data):
-                let raw = try saveDataToTempFile(data, ext: "jpg")
-                temps.append(raw)
-                let scaled = scaleImageIfNeeded(raw)
-                if scaled != raw { temps.append(scaled) }
-                descs.append(Desc(kind: "image", text: nil, file: scaled))
-            case .audioPath(let path):
-                try validateMediaPath(path, label: "Audio")
-                descs.append(Desc(kind: "audio", text: nil, file: path))
-            case .audioData(let data):
-                let raw = try saveDataToTempFile(data, ext: "wav")
-                temps.append(raw)
-                descs.append(Desc(kind: "audio", text: nil, file: raw))
+        do {
+            for part in preprocessed {
+                switch part.kind {
+                case .text(let text):
+                    descs.append(Desc(kind: "text", text: text, file: nil))
+                case .imagePath(let path):
+                    try validateMediaPath(path, label: "Image")
+                    let scaled = scaleImageIfNeeded(path)
+                    if scaled != path { temps.append(scaled) }
+                    descs.append(Desc(kind: "image", text: nil, file: scaled))
+                case .imageData(let data):
+                    let raw = try saveDataToTempFile(data, ext: "jpg")
+                    temps.append(raw)
+                    let scaled = scaleImageIfNeeded(raw)
+                    if scaled != raw { temps.append(scaled) }
+                    descs.append(Desc(kind: "image", text: nil, file: scaled))
+                case .audioPath(let path):
+                    try validateMediaPath(path, label: "Audio")
+                    descs.append(Desc(kind: "audio", text: nil, file: path))
+                case .audioData(let data):
+                    let raw = try saveDataToTempFile(data, ext: "wav")
+                    temps.append(raw)
+                    descs.append(Desc(kind: "audio", text: nil, file: raw))
+                }
             }
+        } catch {
+            temps.forEach { try? FileManager.default.removeItem(atPath: $0) }
+            throw error
         }
 
         if descs.count == 1 && descs[0].kind == "text" {
@@ -179,7 +184,7 @@ extension HybridLiteRTLM {
         let renderer = UIGraphicsImageRenderer(size: newSize)
         let scaled = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: newSize)) }
         let tmp = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("litert_scaled_\(Int(Date().timeIntervalSince1970 * 1_000)).jpg")
+            .appendingPathComponent("litert_scaled_\(UUID().uuidString).jpg")
         if let data = scaled.jpegData(compressionQuality: 0.9) {
             try? data.write(to: URL(fileURLWithPath: tmp))
         }
@@ -188,7 +193,7 @@ extension HybridLiteRTLM {
 
     private func saveDataToTempFile(_ data: Data, ext: String) throws -> String {
         let tmp = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("litert_buf_\(Int(Date().timeIntervalSince1970 * 1_000)).\(ext)")
+            .appendingPathComponent("litert_buf_\(UUID().uuidString).\(ext)")
         try data.write(to: URL(fileURLWithPath: tmp))
         return tmp
     }

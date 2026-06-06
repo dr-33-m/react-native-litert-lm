@@ -13,17 +13,13 @@ import os
 
 public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protocol {
     
+    // MARK: - Internal (for extension files)
+    
     /// Dedicated background serial queue to protect the JSI/JS thread from blocking and deadlocks (User Rule #1).
     let queue = DispatchQueue(label: "dev.litert.engine", qos: .userInteractive)
     
-    /// Opaque pointer to the LiteRT LM C Engine.
-    private var engine: OpaquePointer?
-    
     /// Opaque pointer to the active conversation state.
     var conversation: OpaquePointer?
-    
-    /// Thread-safe status flag.
-    private var isLoaded = false
     
     /// Conversation history.
     var history: [Message] = []
@@ -37,6 +33,17 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         totalTime: 0.0,
         tokensPerSecond: 0.0
     )
+    
+    var loadedModelPath: String?
+    let modelStore = HybridModelStore()
+    
+    // MARK: - Private state
+    
+    /// Opaque pointer to the LiteRT LM C Engine.
+    private var engine: OpaquePointer?
+    
+    /// Thread-safe status flag.
+    private var isLoaded = false
     
     // Default configuration variables
     private var backend: Backend = .cpu
@@ -257,6 +264,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             
             self.engine = engine
             self.createNewConversation()
+            self.loadedModelPath = modelPath
             
             guard self.conversation != nil else {
                 self.closeInternal()
@@ -314,11 +322,10 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         fileName: String,
         onProgress: ((Double) -> Void)?
     ) throws -> Promise<String> {
-        let store = HybridModelStore()
-        return try store.downloadFile(
+        return try modelStore.downloadFile(
             url: url,
             fileName: fileName,
-            headersJson: "",
+            headersJson: "{}",
             onProgress: { progress in
                 onProgress?(progress)
             }
@@ -330,10 +337,12 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         queue.async {
             do {
-                let store = HybridModelStore()
-                try store.deleteFile(fileName: fileName)
-                if self.isLoaded {
-                    self.closeInternal()
+                try self.modelStore.deleteFile(fileName: fileName)
+                let currentlyLoadedName = self.loadedModelPath.map { ($0 as NSString).lastPathComponent.lowercased() }
+                if let loadedName = currentlyLoadedName, loadedName == fileName.lowercased() {
+                    if self.isLoaded {
+                        self.closeInternal()
+                    }
                 }
                 promise.resolve()
             } catch {
@@ -405,6 +414,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private func closeInternal() {
         isLoaded = false
         history.removeAll()
+        loadedModelPath = nil
         
         if let conversation = self.conversation {
             litert_lm_conversation_delete(conversation)
@@ -425,7 +435,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
-    // MARK: - String and JSON Preprocessing Helpers
+    // MARK: - Internal Preprocessing Helpers (for extension files)
     
     private let kControlTokens = [
         "<end_of_turn>",

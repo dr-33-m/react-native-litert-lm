@@ -83,6 +83,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     @Volatile
     private var isClosed = false
 
+    private val modelStore = HybridModelStore()
+    private var loadedModelPath: String? = null
+
     // Conversation history for getHistory()
     // Synchronized to prevent ConcurrentModificationException: history is
     // written from Promise.parallel workers and sendMessageAsync SDK callbacks,
@@ -291,6 +294,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // Create Conversation
                     createNewConversation()
                     Log.i(TAG, "Conversation created successfully")
+                    loadedModelPath = modelPath
     
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to load model: ${e.message}", e)
@@ -343,7 +347,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         // Save to temp file
         val cacheDir = LiteRTLMInitProvider.applicationContext?.cacheDir
             ?: throw RuntimeException("Application context not available for image resizing")
-        val tempFile = java.io.File(cacheDir, "resized_${System.currentTimeMillis()}.jpg")
+        val tempFile = java.io.File(cacheDir, "resized_${java.util.UUID.randomUUID()}.jpg")
         java.io.FileOutputStream(tempFile).use { out ->
             resizedBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, out)
         }
@@ -366,16 +370,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
 
     override fun downloadModel(url: String, fileName: String, onProgress: ((Double) -> Unit)?): Promise<String> {
-        val store = HybridModelStore()
-        return store.downloadFile(url, fileName, "", onProgress ?: {})
+        return modelStore.downloadFile(url, fileName, "{}", onProgress ?: {})
     }
 
     override fun deleteModel(fileName: String): Promise<Unit> {
         return Promise.parallel {
-            val store = HybridModelStore()
-            store.deleteFile(fileName)
-            if (engine != null) {
-                cleanupInternal()
+            modelStore.deleteFile(fileName)
+            val currentlyLoadedName = loadedModelPath?.substringAfterLast("/")?.lowercase()
+            if (currentlyLoadedName != null && currentlyLoadedName == fileName.lowercase()) {
+                if (engine != null) {
+                    cleanupInternal()
+                }
             }
         }
     }
@@ -477,6 +482,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             conversation = null
             engine?.close()        // Direct call
             engine = null 
+            loadedModelPath = null
         } catch (e: Exception) {
             Log.e(TAG, "Error closing resources", e)
         }
@@ -549,9 +555,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         onToken: (String, Boolean) -> Unit,
     ): Promise<Unit> {
         val voidPromise = Promise<Unit>()
-        execute(parts, onToken)
-            .then { voidPromise.resolve(Unit) }
-            .catch { voidPromise.reject(it) }
+        try {
+            execute(parts, onToken)
+                .then { voidPromise.resolve(Unit) }
+                .catch { voidPromise.reject(it) }
+        } catch (e: Throwable) {
+            voidPromise.reject(e)
+        }
         return voidPromise
     }
 
@@ -609,7 +619,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 part.bytes != null -> {
                                     val tmp = java.io.File(
                                         LiteRTLMInitProvider.applicationContext!!.cacheDir,
-                                        "litert_buf_${System.currentTimeMillis()}.jpg"
+                                        "litert_buf_${java.util.UUID.randomUUID()}.jpg"
                                     )
                                     tmp.writeBytes(part.bytes)
                                     tempFiles.add(tmp)
@@ -630,7 +640,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 part.bytes != null -> {
                                     val tmp = java.io.File(
                                         LiteRTLMInitProvider.applicationContext!!.cacheDir,
-                                        "litert_buf_${System.currentTimeMillis()}.wav"
+                                        "litert_buf_${java.util.UUID.randomUUID()}.wav"
                                     )
                                     tmp.writeBytes(part.bytes)
                                     tempFiles.add(tmp)

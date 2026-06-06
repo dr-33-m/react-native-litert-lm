@@ -122,4 +122,66 @@ class HybridLiteRTLMTests: XCTestCase {
             XCTAssertEqual(stats.tokensPerSecond, 0.0)
         }
     }
+
+    func testDeleteModelCleanupLogic() async throws {
+        bridge.loadedModelPath = "/path/to/my_loaded_model.litertlm"
+
+        let promise1 = try bridge.deleteModel(fileName: "other_model.litertlm")
+        _ = try await promise1.await()
+        XCTAssertEqual(bridge.loadedModelPath, "/path/to/my_loaded_model.litertlm")
+
+        let promise2 = try bridge.deleteModel(fileName: "my_loaded_model.litertlm")
+        _ = try await promise2.await()
+        XCTAssertNil(bridge.loadedModelPath)
+    }
+
+    func testExecutePathPrecedenceOverBuffer() async throws {
+        let pathPart = MultimodalPart(
+            type: .image,
+            text: nil,
+            path: "/nonexistent/precedence_test_image.jpg",
+            imageBuffer: nil,
+            audioBuffer: nil
+        )
+        
+        do {
+            let promise = try bridge.execute(parts: [pathPart], onToken: nil)
+            _ = try await promise.await()
+            XCTFail("Should have failed")
+        } catch {
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("file not found: /nonexistent/precedence_test_image.jpg"))
+        }
+    }
+
+    func testExecuteTempFileCleanupOnError() async throws {
+        let dummyData = Data([0, 1, 2, 3])
+        let buffer = ArrayBuffer(dummyData)
+        
+        let bufferPart = MultimodalPart(
+            type: .image,
+            text: nil,
+            path: nil,
+            imageBuffer: buffer,
+            audioBuffer: nil
+        )
+        
+        let invalidPathPart = MultimodalPart(
+            type: .image,
+            text: nil,
+            path: "/nonexistent/invalid_file_cleanup_test.jpg",
+            imageBuffer: nil,
+            audioBuffer: nil
+        )
+        
+        do {
+            let promise = try bridge.execute(parts: [bufferPart, invalidPathPart], onToken: nil)
+            _ = try await promise.await()
+            XCTFail("Should have failed")
+        } catch {
+            let tempDirAfter = try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())
+            let leakedFiles = tempDirAfter.filter { $0.contains("litert_buf_") }
+            XCTAssertEqual(leakedFiles.count, 0)
+        }
+    }
 }

@@ -132,4 +132,12 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
       config
     );
   });
+
+  it('should forward execute call exactly to native execute', async () => {
+    const parts = [
+      { type: 'image' as const, path: '/path/to/image.jpg', imageBuffer: new ArrayBuffer(10) }
+    ];
+    await llm.execute(parts);
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith(parts, undefined);
+  });
 });

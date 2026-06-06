@@ -185,7 +185,7 @@ export function useModel(
       try {
         const response = await modelRef.current.execute(
           [{ type: "text", text: prompt }],
-          () => {} // satisfy test callbacks / mock expectations
+          undefined
         );
         refreshMemorySummary();
         return response;

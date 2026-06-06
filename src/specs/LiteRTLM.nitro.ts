@@ -42,7 +42,10 @@ export interface MultimodalPart {
   type: PartType;
   /** The plain text content, if type is 'text' */
   text?: string;
-  /** Local filesystem path to an image or audio file, if type is 'image' or 'audio' */
+  /**
+   * Local filesystem path to an image or audio file, if type is 'image' or 'audio'.
+   * Takes precedence over `imageBuffer`/`audioBuffer` if both are set.
+   */
   path?: string;
   /** Raw image binary data, if type is 'image' (zero-copy ArrayBuffer mapping) */
   imageBuffer?: ArrayBuffer;
