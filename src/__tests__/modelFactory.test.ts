@@ -103,4 +103,33 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     const untrackedLLM = createLLM({ enableMemoryTracking: false });
     expect(untrackedLLM.memoryTracker).toBeUndefined();
   });
+
+  it('should forward maxContextTokens and maxOutputTokens config to native loadModel', async () => {
+    const config = {
+      backend: 'cpu' as const,
+      maxContextTokens: 8192,
+      maxOutputTokens: 2048,
+    };
+
+    await llm.loadModel('/local/path/model.litertlm', config);
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledWith(
+      '/local/path/model.litertlm',
+      config
+    );
+  });
+
+  it('should forward legacy maxTokens config to native loadModel for backward compat', async () => {
+    const config = {
+      backend: 'cpu' as const,
+      maxTokens: 512,
+    };
+
+    await llm.loadModel('/local/path/model.litertlm', config);
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalledWith(
+      '/local/path/model.litertlm',
+      config
+    );
+  });
 });

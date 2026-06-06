@@ -153,4 +153,64 @@ describe('useModel React Hook Unit Tests', () => {
     hookResult.unmount();
     expect(mockLiteRTLM.close).toHaveBeenCalled();
   });
+
+  it('should pass maxContextTokens and maxOutputTokens through to loadModel', async () => {
+    let hookResult: any;
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', {
+        autoLoad: true,
+        maxContextTokens: 8192,
+        maxOutputTokens: 2048,
+      }));
+    });
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
+    const callArgs = mockLiteRTLM.loadModel.mock.calls[0];
+    const config = callArgs[1];
+    expect(config).toMatchObject({
+      maxContextTokens: 8192,
+      maxOutputTokens: 2048,
+    });
+  });
+
+  it('should pass legacy maxTokens through when new fields are not set', async () => {
+    let hookResult: any;
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', {
+        autoLoad: true,
+        maxTokens: 512,
+      }));
+    });
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
+    const callArgs = mockLiteRTLM.loadModel.mock.calls[0];
+    const config = callArgs[1];
+    expect(config).toMatchObject({ maxTokens: 512 });
+    expect(config.maxContextTokens).toBeUndefined();
+    expect(config.maxOutputTokens).toBeUndefined();
+  });
+
+  it('should pass both new fields alongside legacy maxTokens when all are set', async () => {
+    let hookResult: any;
+
+    await TestRenderer.act(async () => {
+      hookResult = renderHook(() => useModel('https://example.com/model.litertlm', {
+        autoLoad: true,
+        maxTokens: 512,
+        maxContextTokens: 4096,
+        maxOutputTokens: 1024,
+      }));
+    });
+
+    expect(mockLiteRTLM.loadModel).toHaveBeenCalled();
+    const callArgs = mockLiteRTLM.loadModel.mock.calls[0];
+    const config = callArgs[1];
+    expect(config).toMatchObject({
+      maxTokens: 512,
+      maxContextTokens: 4096,
+      maxOutputTokens: 1024,
+    });
+  });
 });

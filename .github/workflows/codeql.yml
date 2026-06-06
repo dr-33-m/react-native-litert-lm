@@ -1,0 +1,131 @@
+name: "CodeQL Analysis"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '30 16 * * 4'
+
+jobs:
+  analyze-js-cpp:
+    name: Analyze JS/TS & C/C++
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    strategy:
+      matrix:
+        language: [ 'javascript-typescript', 'c-cpp' ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+
+  analyze-android:
+    name: Analyze Android (Java/Kotlin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    env:
+      SKIP_IOS_FRAMEWORK_DOWNLOAD: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies and generate native projects
+        run: |
+          npm install
+          npm run specs
+          cd example
+          npm install
+          npx expo prebuild --clean --platform android
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: java-kotlin
+          build-mode: manual
+
+      - name: Build Android library
+        run: |
+          cd example/android
+          ./gradlew :react-native-litert-lm:assembleDebug --no-daemon
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+
+  analyze-ios:
+    name: Analyze iOS (Swift)
+    runs-on: macos-15
+    timeout-minutes: 90
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies and generate native projects
+        run: |
+          npm install
+          npm run specs
+          cd example
+          npm install
+          npx expo prebuild --clean --platform ios
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: swift
+          build-mode: manual
+
+      - name: Build iOS library
+        run: |
+          WORKSPACE=$(find example/ios -name "*.xcworkspace" -maxdepth 1 | head -1)
+          if [ -z "$WORKSPACE" ]; then
+            echo "Error: No .xcworkspace found in example/ios/"
+            ls -la example/ios/
+            exit 1
+          fi
+          echo "Building with workspace: $WORKSPACE"
+          xcodebuild -workspace "$WORKSPACE" \
+            -scheme react-native-litert-lm \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            build
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
