@@ -165,13 +165,21 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                                 System.loadLibrary("OpenCL")
                                 true
                             } catch (_: UnsatisfiedLinkError) {
-                                try {
-                                    // Some devices have it at a non-standard path
-                                    System.load("/system/vendor/lib64/libOpenCL.so")
-                                    true
-                                } catch (_: UnsatisfiedLinkError) {
-                                    false
+                                val paths = arrayOf(
+                                    "/vendor/lib64/libOpenCL.so",
+                                    "/system/vendor/lib64/libOpenCL.so",
+                                    "/vendor/lib/libOpenCL.so",
+                                    "/system/lib64/libOpenCL.so"
+                                )
+                                var loaded = false
+                                for (path in paths) {
+                                    try {
+                                        System.load(path)
+                                        loaded = true
+                                        break
+                                    } catch (_: UnsatisfiedLinkError) {}
                                 }
+                                loaded
                             }
                             openCLAvailable = result
                             result
