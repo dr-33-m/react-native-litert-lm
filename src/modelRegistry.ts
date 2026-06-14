@@ -71,25 +71,26 @@ export const ModelRegistry = {
    * @returns Promise resolving to the absolute local path of the model
    */
   async resolveModel(pathOrUrl: string, options?: ModelDownloadOptions): Promise<string> {
-    if (pathOrUrl.startsWith("http://") || pathOrUrl.startsWith("https://")) {
-      if (pathOrUrl.startsWith("http://")) {
+    const cleanPath = pathOrUrl.startsWith("file://") ? pathOrUrl.substring(7) : pathOrUrl;
+    if (cleanPath.startsWith("http://") || cleanPath.startsWith("https://")) {
+      if (cleanPath.startsWith("http://")) {
         throw new Error(
           "Insecure HTTP URLs are not allowed for model downloads. " +
             "Use HTTPS instead: " +
-            pathOrUrl.replace("http://", "https://")
+            cleanPath.replace("http://", "https://")
         );
       }
 
-      const urlWithoutQuery = pathOrUrl.split("?")[0];
+      const urlWithoutQuery = cleanPath.split("?")[0];
       const fileName = urlWithoutQuery.split("/").pop();
       if (!fileName) {
-        throw new Error(`Invalid model URL: ${pathOrUrl}`);
+        throw new Error(`Invalid model URL: ${cleanPath}`);
       }
 
       const headersJson = options?.headers ? JSON.stringify(options.headers) : "{}";
       
       return nativeStore.downloadFile(
-        pathOrUrl,
+        cleanPath,
         fileName,
         headersJson,
         (progress) => {
@@ -98,6 +99,6 @@ export const ModelRegistry = {
       );
     }
 
-    return pathOrUrl;
+    return cleanPath;
   }
 };

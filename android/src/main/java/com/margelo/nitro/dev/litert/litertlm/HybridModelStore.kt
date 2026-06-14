@@ -51,7 +51,7 @@ class HybridModelStore : HybridModelStoreSpec() {
             val files = dir.listFiles() ?: return emptyArray()
             val result = mutableListOf<ModelFile>()
             for (f in files) {
-                if (f.isFile) {
+                if (f.isFile && !f.name.endsWith(".tmp")) {
                     result.add(
                         ModelFile(
                             fileName = f.name,

@@ -140,4 +140,14 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     await llm.execute(parts);
     expect(mockLiteRTLM.execute).toHaveBeenCalledWith(parts, undefined);
   });
+
+  it('should strip file:// prefix from paths in execute parts before forwarding to native execute', async () => {
+    const parts = [
+      { type: 'image' as const, path: 'file:///path/to/image.jpg', imageBuffer: new ArrayBuffer(10) }
+    ];
+    await llm.execute(parts);
+    expect(mockLiteRTLM.execute).toHaveBeenCalledWith([
+      { type: 'image' as const, path: '/path/to/image.jpg', imageBuffer: expect.any(ArrayBuffer) }
+    ], undefined);
+  });
 });

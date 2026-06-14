@@ -83,14 +83,21 @@ export function createLLM(options?: {
     parts: MultimodalPart[],
     onToken?: TokenCallback,
   ): Promise<string> => {
+    const processedParts = parts.map((part) => {
+      if (part.path?.startsWith("file://")) {
+        return { ...part, path: part.path.substring(7) };
+      }
+      return part;
+    });
+
     if (onToken) {
       const wrapped: TokenCallback = (token, done) => {
         onToken(token, done);
         if (done) recordMemorySnapshot();
       };
-      return native.execute(parts, wrapped);
+      return native.execute(processedParts, wrapped);
     }
-    return native.execute(parts, undefined).then((result: string) => {
+    return native.execute(processedParts, undefined).then((result: string) => {
       recordMemorySnapshot();
       return result;
     });

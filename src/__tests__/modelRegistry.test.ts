@@ -64,4 +64,10 @@ describe('ModelRegistry Unit Tests', () => {
     expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
     expect(path).toBe('/local/path/model.bin');
   });
+
+  it('resolveModel should strip file:// prefix from local paths', async () => {
+    const path = await ModelRegistry.resolveModel('file:///local/path/model.bin');
+    expect(mockModelStore.downloadFile).not.toHaveBeenCalled();
+    expect(path).toBe('/local/path/model.bin');
+  });
 });

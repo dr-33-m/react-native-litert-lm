@@ -485,14 +485,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     private fun cleanupInternal() {
-        try {
-            conversation?.close()
-            conversation = null
-            engine?.close()        // Direct call
-            engine = null 
-            loadedModelPath = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing resources", e)
+        synchronized(initLock) {
+            try {
+                conversation?.close()
+                conversation = null
+                engine?.close()        // Direct call
+                engine = null 
+                loadedModelPath = null
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing resources", e)
+            }
         }
     }
 

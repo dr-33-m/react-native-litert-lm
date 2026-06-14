@@ -58,6 +58,7 @@ public class HybridModelStore: HybridModelStoreSpec_base, HybridModelStoreSpec_p
         var files: [ModelFile] = []
         
         for name in contents {
+            if name.hasSuffix(".tmp") { continue }
             let path = (dir as NSString).appendingPathComponent(name)
             var isDir: ObjCBool = false
             if fileManager.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {

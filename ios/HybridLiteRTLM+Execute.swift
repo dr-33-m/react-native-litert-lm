@@ -158,21 +158,30 @@ extension HybridLiteRTLM {
         }
 
         if descs.count == 1 && descs[0].kind == "text" {
-            return (buildTextMessageJson(text: descs[0].text ?? ""), temps)
+            let payload: [String: Any] = ["role": "user", "content": descs[0].text ?? ""]
+            let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            if let jsonString = String(data: data, encoding: .utf8) {
+                return (jsonString, temps)
+            }
         }
 
-        let partsJson = descs.map { d -> String in
-            switch d.kind {
-            case "text":  return "{\"type\":\"text\",\"text\":\"" + escapeJson(d.text ?? "") + "\"}"
-            case "image": return "{\"type\":\"image\",\"path\":\"" + escapeJson(d.file ?? "") + "\"}"
-            default:      return "{\"type\":\"audio\",\"path\":\"" + escapeJson(d.file ?? "") + "\"}"
+        var contents: [[String: String]] = []
+        for d in descs {
+            if d.kind == "text" {
+                contents.append(["type": "text", "text": d.text ?? ""])
+            } else if d.kind == "image" {
+                contents.append(["type": "image", "path": d.file ?? ""])
+            } else {
+                contents.append(["type": "audio", "path": d.file ?? ""])
             }
-        }.joined(separator: ",")
-        return ("{\"role\":\"user\",\"content\":[" + partsJson + "]}", temps)
-    }
+        }
 
-    private func buildTextMessageJson(text: String) -> String {
-        return "{\"role\":\"user\",\"content\":\"" + escapeJson(text) + "\"}"
+        let payload: [String: Any] = ["role": "user", "content": contents]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [])
+        guard let jsonString = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "LiteRTLM", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to encode JSON payload"])
+        }
+        return (jsonString, temps)
     }
 
     private func scaleImageIfNeeded(_ imagePath: String, maxDimension: Int = 1024) -> String {
@@ -186,9 +195,15 @@ extension HybridLiteRTLM {
         let tmp = (NSTemporaryDirectory() as NSString)
             .appendingPathComponent("litert_scaled_\(UUID().uuidString).jpg")
         if let data = scaled.jpegData(compressionQuality: 0.9) {
-            try? data.write(to: URL(fileURLWithPath: tmp))
+            do {
+                try data.write(to: URL(fileURLWithPath: tmp))
+                return tmp
+            } catch {
+                NSLog("[LiteRTLM] Failed to write scaled image to temp file: \(error.localizedDescription)")
+                return imagePath
+            }
         }
-        return tmp
+        return imagePath
     }
 
     private func saveDataToTempFile(_ data: Data, ext: String) throws -> String {
