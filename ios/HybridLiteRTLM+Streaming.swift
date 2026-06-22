@@ -13,7 +13,7 @@ class ExecuteStreamContext {
     let userLabel: String
     let startTime: Date
     let onToken: (_ token: String, _ done: Bool) -> Void
-    let promise: Promise<String>
+    let promise: Promise<ExecuteResult>
     let parent: HybridLiteRTLM
     let cleanup: () -> Void
     var rawResponse: String = ""
@@ -25,7 +25,7 @@ class ExecuteStreamContext {
         userLabel: String,
         startTime: Date,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
-        promise: Promise<String>,
+        promise: Promise<ExecuteResult>,
         parent: HybridLiteRTLM,
         cleanup: @escaping () -> Void
     ) {
@@ -45,7 +45,7 @@ extension HybridLiteRTLM {
         msgJson: String,
         userLabel: String,
         onToken: @escaping (_ token: String, _ done: Bool) -> Void,
-        promise: Promise<String>,
+        promise: Promise<ExecuteResult>,
         cleanup: @escaping () -> Void
     ) {
         let ctx = ExecuteStreamContext(
@@ -113,7 +113,8 @@ extension HybridLiteRTLM {
             )
             ctx.onToken("", true)
             ctx.cleanup()
-            ctx.promise.resolve(withResult: ctx.fullResponse)
+            // iOS: tool calls not yet captured from C API — return empty array
+            ctx.promise.resolve(withResult: ExecuteResult(text: ctx.fullResponse, toolCalls: [], thinkingText: ""))
             Unmanaged<ExecuteStreamContext>.fromOpaque(streamPtr).release()
         }
     }

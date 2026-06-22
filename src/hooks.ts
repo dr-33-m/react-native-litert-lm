@@ -29,7 +29,7 @@ export interface UseModelResult {
   isGenerating: boolean;
   downloadProgress: number;
   error: string | null;
-  generate: (prompt: string) => Promise<string>;
+  generate: (prompt: string) => Promise<import("./specs/LiteRTLM.nitro").ExecuteResult>;
   reset: () => void;
   /**
    * Delete the model file. If no fileName is provided, derives it from
@@ -79,6 +79,7 @@ export function useModel(
   const multimodal = config?.multimodal;
   const tools = config?.tools;
   const enableSpeculativeDecoding = config?.enableSpeculativeDecoding;
+  const enableThinking = config?.enableThinking;
   const toolsKey = tools ? JSON.stringify(tools) : undefined;
 
   // Build a stable config object from the destructured primitives
@@ -97,6 +98,7 @@ export function useModel(
       ...(enableSpeculativeDecoding !== undefined && {
         enableSpeculativeDecoding,
       }),
+      ...(enableThinking !== undefined && { enableThinking }),
     }),
     [
       backend,
@@ -110,6 +112,7 @@ export function useModel(
       multimodal,
       toolsKey,
       enableSpeculativeDecoding,
+      enableThinking,
     ],
   );
 
@@ -176,7 +179,7 @@ export function useModel(
   }, [autoLoad, load]);
 
   const generate = useCallback(
-    async (prompt: string): Promise<string> => {
+    async (prompt: string) => {
       if (!modelRef.current || !isReady) {
         throw new Error("Model not ready");
       }

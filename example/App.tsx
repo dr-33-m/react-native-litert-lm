@@ -14,7 +14,6 @@ import {
   Platform,
   ActivityIndicator,
   TextInput,
-  Image,
   Animated,
   Easing,
   KeyboardAvoidingView,
@@ -25,14 +24,12 @@ import {
   useModel,
   GEMMA_3N_E2B_IT_INT4,
   GEMMA_4_E2B_IT,
-  checkMultimodalSupport,
+  // checkMultimodalSupport, // FIXME: re-enable with image attachment
   checkBackendSupport,
   type MemoryUsage,
 } from "react-native-litert-lm";
-
-// ─── Asset helpers ───────────────────────────────────────────────────────────
-const TEST_IMAGE_ASSET = require("./test.jpeg");
-const TEST_AUDIO_ASSET = require("./test.wav");
+// FIXME: re-enable with image attachment
+// import { launchImageLibrary } from "react-native-image-picker";
 
 
 
@@ -58,7 +55,7 @@ const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 const { width: SCREEN_W } = Dimensions.get("window");
 
 // ─── Types ───────────────────────────────────────────────────────────────────
-type ChatMsg = { role: "user" | "model"; text: string; ts: number };
+type ChatMsg = { role: "user" | "model"; text: string; ts: number; thinking?: string };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 function fmtBytes(b: number): string {
@@ -98,7 +95,10 @@ function Main() {
   const [liveMemory, setLiveMemory] = useState<MemoryUsage | null>(null);
   const [enableSpeculativeDecoding, setEnableSpeculativeDecoding] = useState(false);
   const [enableTools, setEnableTools] = useState(false);
-  const [attachment, setAttachment] = useState<"image" | "audio" | null>(null);
+  const [enableThinking, setEnableThinking] = useState(false);
+  // FIXME: re-enable with image attachment
+  // const [attachedImage, setAttachedImage] = useState<{ uri: string; name: string } | null>(null);
+  const [activeBackend, setActiveBackend] = useState<string>(backend);
   const scrollRef = useRef<ScrollView>(null);
 
   const config = useMemo(
@@ -111,6 +111,7 @@ function Main() {
       enableMemoryTracking: true,
       maxMemorySnapshots: 100,
       enableSpeculativeDecoding,
+      enableThinking,
       tools: enableTools
         ? [
           {
@@ -128,7 +129,7 @@ function Main() {
         ]
         : undefined,
     }),
-    [backend, enableSpeculativeDecoding, enableTools],
+    [backend, enableSpeculativeDecoding, enableThinking, enableTools],
   );
 
   const {
@@ -141,6 +142,20 @@ function Main() {
     memorySummary,
   } = useModel(MODELS[sel].url, config);
 
+  // ── Query actual backend after model loads ────────────────────────────────
+  useEffect(() => {
+    if (isReady && model) {
+      try {
+        const actual = model.getActiveBackend();
+        setActiveBackend(actual);
+      } catch {
+        setActiveBackend(backend);
+      }
+    } else {
+      setActiveBackend(backend);
+    }
+  }, [isReady, model, backend]);
+
   // ── Scroll to bottom on new messages ──────────────────────────────────────
   useEffect(() => {
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
@@ -150,51 +165,95 @@ function Main() {
   const send = useCallback(async () => {
     if (!model || busy) return;
     const msg = input.trim();
-    if (!msg && !attachment) return;
+    if (!msg) return;
 
     setInput("");
     setBusy(true);
-    const currentAttachment = attachment;
-    setAttachment(null);
 
-    let displayMsg = msg;
-    if (currentAttachment) {
-      displayMsg = `[Sent with ${currentAttachment}] ${msg}`;
-    }
-    setChat((prev) => [...prev, { role: "user", text: displayMsg, ts: Date.now() }]);
+    setChat((prev) => [...prev, { role: "user", text: msg, ts: Date.now() }]);
     setStreaming("");
 
     try {
       const parts: any[] = [];
 
-      if (currentAttachment === "image") {
-        const uri = Image.resolveAssetSource(TEST_IMAGE_ASSET).uri;
-        const response = await fetch(uri);
-        const buffer = await response.arrayBuffer();
-        parts.push({ type: "image", imageBuffer: buffer });
-      } else if (currentAttachment === "audio") {
-        const uri = Image.resolveAssetSource(TEST_AUDIO_ASSET).uri;
-        const response = await fetch(uri);
-        const buffer = await response.arrayBuffer();
-        parts.push({ type: "audio", audioBuffer: buffer });
-      }
+      // FIXME: image attachment disabled — re-enable once native image path resolution is fixed
 
       if (msg) {
         parts.push({ type: "text", text: msg });
       }
 
-      setStreaming(currentAttachment ? "Reading attachment..." : "");
+      const hasTools = enableTools && config.tools && config.tools.length > 0;
 
-      let full = "";
-      const reply = await model.execute(parts, (token) => {
-        full += token;
-        setStreaming(full);
-      });
+      if (hasTools) {
+        // ── Tools enabled: use streaming but suppress first-pass display ──
+        // The blocking path (no callback) crashes because the SDK's parser
+        // fails on Gemma 4's sometimes-malformed tool call tokens.
+        // Streaming works fine — we just don't show the first-pass text.
+        setStreaming("Processing...");
 
-      setChat((prev) => [
-        ...prev,
-        { role: "model", text: reply, ts: Date.now() },
-      ]);
+        // Stream silently to let the SDK capture tool calls
+        const result = await model.execute(parts, () => {});
+
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          const toolNames = result.toolCalls.map((tc: any) => tc.name).join(", ");
+          setStreaming("Calling " + toolNames + "...");
+
+          const toolResults = result.toolCalls.map((tc: any) => {
+            if (tc.name === "get_current_weather") {
+              const args = JSON.parse(tc.argumentsJson);
+              return {
+                name: tc.name,
+                responseJson: JSON.stringify({
+                  location: args.location,
+                  temperature: 22,
+                  unit: args.unit || "celsius",
+                  condition: "Sunny",
+                }),
+              };
+            }
+            return { name: tc.name, responseJson: '{"error": "Unknown tool"}' };
+          });
+
+          // Stream the real response after tool execution
+          let toolFull = "";
+          const toolResult = await model.sendToolResponse(toolResults, (token: string) => {
+            toolFull += token;
+            setStreaming(toolFull);
+          });
+
+          setChat((prev) => [
+            ...prev,
+            { role: "model", text: toolResult.text, ts: Date.now(), thinking: toolResult.thinkingText || undefined },
+          ]);
+        } else {
+          // Model answered without calling tools
+          setChat((prev) => [
+            ...prev,
+            { role: "model", text: result.text, ts: Date.now(), thinking: result.thinkingText || undefined },
+          ]);
+        }
+      } else {
+        // ── No tools: stream normally ─────────────────────────────────────
+        setStreaming(enableThinking ? "Thinking..." : "");
+
+        let full = "";
+        let hasStartedResponse = false;
+        const result = await model.execute(parts, (token: string) => {
+          if (token) {
+            if (!hasStartedResponse && enableThinking) {
+              hasStartedResponse = true;
+              full = ""; // Clear "Thinking..." when actual response starts
+            }
+            full += token;
+            setStreaming(full);
+          }
+        });
+
+        setChat((prev) => [
+          ...prev,
+          { role: "model", text: result.text, ts: Date.now(), thinking: result.thinkingText || undefined },
+        ]);
+      }
       setStreaming("");
 
       // Refresh memory stats
@@ -210,7 +269,7 @@ function Main() {
     } finally {
       setBusy(false);
     }
-  }, [model, input, attachment, busy]);
+  }, [model, input, busy]);
 
   // ── Stats ─────────────────────────────────────────────────────────────────
   const stats = model && isReady ? model.getStats() : null;
@@ -236,7 +295,7 @@ function Main() {
             </Text>
             <Text style={s.tagline}>
               On-device AI •{" "}
-              {Platform.OS === "ios" ? "Metal" : backend.toUpperCase()}
+              {Platform.OS === "ios" ? "Metal" : activeBackend.toUpperCase()}
             </Text>
           </View>
           <TouchableOpacity
@@ -276,17 +335,15 @@ function Main() {
             <Text style={[s.drawerTitle, { marginTop: 14 }]}>Backend</Text>
             <View style={s.pillRow}>
               {(["cpu", "gpu"] as const).map((b) => {
-                const warning = b === "gpu" ? gpuWarning : undefined;
-                const isDisabled = !canInteract || !!warning;
                 return (
                   <TouchableOpacity
                     key={b}
-                    disabled={isDisabled}
+                    disabled={!canInteract}
                     onPress={() => setBackend(b)}
                     style={[
                       s.pill,
                       backend === b && s.pillActive,
-                      isDisabled && { opacity: 0.4 },
+                      !canInteract && { opacity: 0.4 },
                     ]}
                   >
                     <Text
@@ -294,7 +351,6 @@ function Main() {
                     >
                       {b.toUpperCase()}
                     </Text>
-                    {!!warning && <Text style={s.pillSub}>Not supported</Text>}
                   </TouchableOpacity>
                 );
               })}
@@ -321,18 +377,33 @@ function Main() {
               </TouchableOpacity>
 
               <TouchableOpacity
-                disabled={!canInteract}
+                disabled={!canInteract || enableThinking}
                 onPress={() => setEnableTools(!enableTools)}
                 style={[
                   s.pill,
                   enableTools && s.pillActive,
-                  !canInteract && { opacity: 0.5 },
+                  (!canInteract || enableThinking) && { opacity: 0.5 },
                 ]}
               >
                 <Text style={[s.pillText, enableTools && s.pillTextActive]}>
                   Tools
                 </Text>
                 <Text style={s.pillSub}>Function calling</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                disabled={!canInteract || enableTools}
+                onPress={() => setEnableThinking(!enableThinking)}
+                style={[
+                  s.pill,
+                  enableThinking && s.pillActive,
+                  (!canInteract || enableTools) && { opacity: 0.5 },
+                ]}
+              >
+                <Text style={[s.pillText, enableThinking && s.pillTextActive]}>
+                  Thinking
+                </Text>
+                <Text style={s.pillSub}>Reasoning</Text>
               </TouchableOpacity>
             </View>
 
@@ -515,42 +586,17 @@ function Main() {
         {/* ── Input bar ──────────────────────────────────────────────────── */}
         {isReady && (
           <View style={{ backgroundColor: T.bg }}>
-            {attachment && (
-              <View style={s.attachmentPreview}>
-                <Text style={s.attachmentPreviewText}>
-                  📎 Attached: {attachment === "image" ? "test.jpeg" : "test.wav"}
-                </Text>
-                <TouchableOpacity onPress={() => setAttachment(null)} style={s.removeAttachmentBtn}>
-                  <Text style={s.removeAttachmentText}>✕</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+            {/* FIXME: Image attachment disabled — resolveAssetUri crashes on Android
+               when processing bundled assets or content:// URIs from image picker.
+               Needs investigation: the native resizeImageIfNeeded / LiteRT SDK
+               image processing pipeline causes a hard crash (app closes).
+               Re-enable once image path resolution is fixed end-to-end. */}
 
             <View style={s.inputBar}>
-              <TouchableOpacity
-                style={s.attachBtn}
-                onPress={() => {
-                  const warning = checkMultimodalSupport();
-                  if (warning) {
-                    alert(`Multimodal feature warning:\n\n${warning}`);
-                    return;
-                  }
-                  if (attachment === null) {
-                    setAttachment("image");
-                  } else if (attachment === "image") {
-                    setAttachment("audio");
-                  } else {
-                    setAttachment(null);
-                  }
-                }}
-                disabled={busy}
-              >
-                <Text style={s.attachIcon}>📎</Text>
-              </TouchableOpacity>
 
               <TextInput
                 style={s.input}
-                placeholder={attachment ? "Add message with attachment..." : "Message…"}
+                placeholder="Message…"
                 placeholderTextColor={T.dim}
                 value={input}
                 onChangeText={setInput}
@@ -559,17 +605,24 @@ function Main() {
                 returnKeyType="send"
                 multiline
               />
-              <TouchableOpacity
-                style={[s.sendBtn, (!input.trim() && !attachment || busy) && { opacity: 0.4 }]}
-                onPress={send}
-                disabled={(!input.trim() && !attachment) || busy}
-              >
-                {busy ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
+              {busy ? (
+                <TouchableOpacity
+                  style={[s.sendBtn, { backgroundColor: T.error }]}
+                  onPress={() => {
+                    model?.stopGeneration();
+                  }}
+                >
+                  <Text style={s.sendIcon}>■</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[s.sendBtn, !input.trim() && { opacity: 0.4 }]}
+                  onPress={send}
+                  disabled={!input.trim()}
+                >
                   <Text style={s.sendIcon}>↑</Text>
-                )}
-              </TouchableOpacity>
+                </TouchableOpacity>
+              )}
             </View>
           </View>
         )}
@@ -598,6 +651,12 @@ function ChatBubble({
         </View>
       )}
       <View style={[s.bubble, isUser ? s.bubbleUser : s.bubbleModel]}>
+        {!!msg.thinking && (
+          <View style={{ backgroundColor: "rgba(255,255,255,0.05)", borderRadius: 8, padding: 8, marginBottom: 8 }}>
+            <Text style={{ color: T.dim, fontSize: 11, fontWeight: "600", marginBottom: 4 }}>Thinking</Text>
+            <Text style={{ color: T.dim, fontSize: 12 }}>{msg.thinking}</Text>
+          </View>
+        )}
         <Text style={[s.bubbleText, isUser && { color: "#fff" }]}>
           {msg.text}
           {isStreaming && <Text style={s.cursor}>▊</Text>}

@@ -142,6 +142,18 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
+    public func getActiveBackend() throws -> Backend {
+        return backend
+    }
+
+    public func stopGeneration() throws {
+        queue.async {
+            guard let conversation = self.conversation else { return }
+            litert_lm_conversation_cancel_process(conversation)
+            NSLog("[LiteRTLM] stopGeneration: cancelled active inference")
+        }
+    }
+
     public func close() throws {
         queue.sync {
             closeInternal()
@@ -280,7 +292,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     // Legacy inference — shapes mirror src/inferenceRouting.ts; JS createLLM routes via execute.
-    public func sendMessage(message: String) throws -> Promise<String> {
+    public func sendMessage(message: String) throws -> Promise<ExecuteResult> {
         try execute(parts: [.textPart(message)], onToken: nil)
     }
 
@@ -291,7 +303,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         try executeVoid(parts: [.textPart(message)], onToken: onToken)
     }
 
-    public func sendMessageWithImage(message: String, imagePath: String) throws -> Promise<String> {
+    public func sendMessageWithImage(message: String, imagePath: String) throws -> Promise<ExecuteResult> {
         try execute(parts: [.textPart(message), .imagePart(imagePath)], onToken: nil)
     }
 
@@ -309,12 +321,22 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         try executeVoid(parts: [.textPart(message), .audioPart(audioPath)], onToken: onToken)
     }
 
-    public func sendMessageWithAudio(message: String, audioPath: String) throws -> Promise<String> {
+    public func sendMessageWithAudio(message: String, audioPath: String) throws -> Promise<ExecuteResult> {
         try execute(parts: [.textPart(message), .audioPart(audioPath)], onToken: nil)
     }
 
-    public func sendMultimodalMessage(parts: [MultimodalPart]) throws -> Promise<String> {
+    public func sendMultimodalMessage(parts: [MultimodalPart]) throws -> Promise<ExecuteResult> {
         try execute(parts: parts, onToken: nil)
+    }
+
+    public func sendToolResponse(
+        responses: [ToolResponse],
+        onToken: ((_ token: String, _ done: Bool) -> Void)?
+    ) throws -> Promise<ExecuteResult> {
+        // Format tool results as a message and send to the conversation
+        let toolResultText = responses.map { "Tool '\($0.name)' result: \($0.responseJson)" }
+            .joined(separator: "\n")
+        return try execute(parts: [.textPart(toolResultText)], onToken: onToken)
     }
 
     public func downloadModel(

@@ -1,5 +1,5 @@
 import { NitroModules } from "react-native-nitro-modules";
-import { LiteRTLM, LLMConfig, MultimodalPart } from "./specs/LiteRTLM.nitro";
+import { LiteRTLM, LLMConfig, MultimodalPart, ExecuteResult } from "./specs/LiteRTLM.nitro";
 import { createMemoryTracker, MemoryTracker } from "./memoryTracker";
 import { ModelRegistry } from "./modelRegistry";
 import {
@@ -82,7 +82,7 @@ export function createLLM(options?: {
   const runExecute = (
     parts: MultimodalPart[],
     onToken?: TokenCallback,
-  ): Promise<string> => {
+  ): Promise<ExecuteResult> => {
     const processedParts = parts.map((part) => {
       if (part.path?.startsWith("file://")) {
         return { ...part, path: part.path.substring(7) };
@@ -97,7 +97,7 @@ export function createLLM(options?: {
       };
       return native.execute(processedParts, wrapped);
     }
-    return native.execute(processedParts, undefined).then((result: string) => {
+    return native.execute(processedParts, undefined).then((result: ExecuteResult) => {
       recordMemorySnapshot();
       return result;
     });
@@ -119,6 +119,9 @@ export function createLLM(options?: {
         return (parts: MultimodalPart[], onToken?: TokenCallback) =>
           runExecute(parts, onToken);
       }
+      if (prop === "stopGeneration") {
+        return () => target.stopGeneration();
+      }
       if (prop === "resetConversation") {
         return () => {
           const result = target.resetConversation();
@@ -127,6 +130,21 @@ export function createLLM(options?: {
         };
       }
 
+      if (prop === "sendToolResponse") {
+        return (responses: any[], onToken?: TokenCallback) => {
+          if (onToken) {
+            const wrapped: TokenCallback = (token, done) => {
+              onToken(token, done);
+              if (done) recordMemorySnapshot();
+            };
+            return native.sendToolResponse(responses, wrapped);
+          }
+          return native.sendToolResponse(responses, undefined).then((result: ExecuteResult) => {
+            recordMemorySnapshot();
+            return result;
+          });
+        };
+      }
       if (isLegacyInferenceMethod(prop)) {
         return (...args: unknown[]) => {
           const route = routeLegacyInference(prop, args)!;

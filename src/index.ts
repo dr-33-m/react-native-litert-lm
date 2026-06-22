@@ -21,6 +21,11 @@ export type {
   /** New in v0.5: pass to execute() instead of individual send methods */
   MultimodalPart,
   PartType,
+  /** Tool calling types */
+  ToolDefinition,
+  ToolCall,
+  ToolResponse,
+  ExecuteResult,
 } from "./specs/LiteRTLM.nitro";
 
 
@@ -137,9 +142,10 @@ export function getRecommendedBackend(): Backend {
 export function checkBackendSupport(backend: Backend): string | undefined {
   if (backend === "gpu") {
     if (Platform.OS === "android") {
-      // LiteRT-LM GPU delegate requires OpenCL, which is unavailable
-      // on most Samsung/Qualcomm devices. Only Pixel devices reliably expose it.
-      return "GPU backend requires OpenCL support, which is unavailable on most Samsung and Qualcomm devices. Will automatically fall back to CPU if unavailable.";
+      // GPU uses OpenCL on Android. Supported on many devices (Mali, Adreno, etc.)
+      // but may not be available on all. The engine will automatically fall back
+      // to CPU if GPU initialization fails.
+      return "GPU acceleration uses OpenCL. If unavailable on this device, the engine will automatically fall back to CPU.";
     }
     // iOS always supports GPU via Metal
     return undefined;

@@ -33,6 +33,7 @@ import com.google.ai.edge.litertlm.ExperimentalApi
 import com.google.ai.edge.litertlm.ExperimentalFlags
 import com.google.ai.edge.litertlm.OpenApiTool
 import com.google.ai.edge.litertlm.ToolProvider
+import com.google.ai.edge.litertlm.tool
 
 
 
@@ -92,6 +93,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // and read from getHistory() which may be called from the JS thread.
     private val history: MutableList<Message> = Collections.synchronizedList(mutableListOf())
 
+    // Tool calls captured during inference via ToolProvider.execute()
+    private val pendingToolCalls: MutableList<ToolCall> = Collections.synchronizedList(mutableListOf())
+
     // Last generation stats
     private var lastStats = GenerationStats(
         promptTokens = 0.0,
@@ -112,6 +116,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     private var systemPrompt: String? = null
     private var tools: Array<ToolDefinition>? = null
     private var enableSpeculativeDecoding: Boolean = false
+    private var enableThinking: Boolean = false
 
     override val memorySize: Long
         get() = 1024L * 1024L * 1024L // ~1GB (models are large)
@@ -152,6 +157,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     cfg.systemPrompt?.let { systemPrompt = it }
                     tools = cfg.tools
                     enableSpeculativeDecoding = cfg.enableSpeculativeDecoding ?: false
+                    enableThinking = cfg.enableThinking ?: false
                 }
     
                 try {
@@ -315,7 +321,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     // Legacy inference — shapes mirror src/inferenceRouting.ts; JS createLLM routes via execute.
-    override fun sendMessage(message: String): Promise<String> =
+    override fun sendMessage(message: String): Promise<ExecuteResult> =
         execute(parts = arrayOf(MultimodalPartFactories.textPart(message)), onToken = null)
 
     override fun sendMessageAsync(message: String, onToken: (String, Boolean) -> Unit): Promise<Unit> =
@@ -325,6 +331,80 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     // Multimodal methods
     // -------------------------------------------------------------------------
     
+    /**
+     * Resolve non-filesystem URIs to real file paths.
+     * Handles: asset:/// , file:///android_asset/ , content:// ,
+     * drawable resource names, and raw resource names.
+     */
+    private fun resolveAssetUri(uri: String, ext: String): String {
+        // Already a real filesystem path
+        if (uri.startsWith("/") && java.io.File(uri).exists()) return uri
+        if (uri.startsWith("file:///") && !uri.startsWith("file:///android_asset/")) {
+            val path = uri.removePrefix("file://")
+            if (java.io.File(path).exists()) return path
+        }
+
+        val context = LiteRTLMInitProvider.applicationContext
+            ?: throw RuntimeException("Application context not available for asset resolution")
+        val tempFile = java.io.File(context.cacheDir, "litert_asset_${java.util.UUID.randomUUID()}.$ext")
+
+        try {
+            // content:// URI (from image picker or some RN asset resolvers)
+            if (uri.startsWith("content://")) {
+                context.contentResolver.openInputStream(android.net.Uri.parse(uri))?.use { input ->
+                    java.io.FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+                } ?: throw RuntimeException("Could not open content URI: $uri")
+                return tempFile.absolutePath
+            }
+
+            // asset:/// or file:///android_asset/ — APK assets folder
+            val assetName = when {
+                uri.startsWith("asset:///") -> uri.removePrefix("asset:///")
+                uri.startsWith("file:///android_asset/") -> uri.removePrefix("file:///android_asset/")
+                else -> null
+            }
+            if (assetName != null) {
+                context.assets.open(assetName).use { input ->
+                    java.io.FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+                }
+                return tempFile.absolutePath
+            }
+
+            // Plain name (e.g. "test") — React Native drawable/raw resource
+            if (!uri.contains("/") && !uri.contains(":")) {
+                // Try raw resource first (preserves original bytes — works for any format)
+                val rawId = context.resources.getIdentifier(uri, "raw", context.packageName)
+                if (rawId != 0) {
+                    context.resources.openRawResource(rawId).use { input ->
+                        java.io.FileOutputStream(tempFile).use { output -> input.copyTo(output) }
+                    }
+                    return tempFile.absolutePath
+                }
+                // Try drawable (images only — re-encodes as JPEG)
+                val drawableId = context.resources.getIdentifier(uri, "drawable", context.packageName)
+                if (drawableId != 0) {
+                    val bitmap = android.graphics.BitmapFactory.decodeResource(context.resources, drawableId)
+                    if (bitmap != null) {
+                        try {
+                            java.io.FileOutputStream(tempFile).use { out ->
+                                bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, out)
+                            }
+                            return tempFile.absolutePath
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            tempFile.delete()
+            Log.e(TAG, "Failed to resolve asset URI '$uri': ${e.message}", e)
+            throw RuntimeException("Failed to resolve media path: $uri", e)
+        }
+
+        return uri
+    }
+
     /**
      * Resize image if dimensions exceed maxDimension to prevent OOM.
      * Gemma 3n's vision encoder is optimized for 512x512 or 1024x1024.
@@ -365,7 +445,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return tempFile.absolutePath
     }
 
-    override fun sendMessageWithImage(message: String, imagePath: String): Promise<String> =
+    override fun sendMessageWithImage(message: String, imagePath: String): Promise<ExecuteResult> =
         execute(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.imagePart(imagePath)),
             onToken = null,
@@ -399,7 +479,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             onToken = onToken,
         )
 
-    override fun sendMessageWithAudio(message: String, audioPath: String): Promise<String> =
+    override fun sendMessageWithAudio(message: String, audioPath: String): Promise<ExecuteResult> =
         execute(
             parts = arrayOf(MultimodalPartFactories.textPart(message), MultimodalPartFactories.audioPart(audioPath)),
             onToken = null,
@@ -478,6 +558,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
     }
 
+    override fun getActiveBackend(): Backend = backend
+
+    override fun stopGeneration() {
+        try {
+            conversation?.cancelProcess()
+            Log.d(TAG, "stopGeneration: cancelled active inference")
+        } catch (e: Exception) {
+            Log.w(TAG, "stopGeneration: ${e.message}")
+        }
+    }
+
     override fun close() {
         Log.d(TAG, "Closing resources")
         isClosed = true
@@ -515,17 +606,27 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             }
             conversation = null
         }
-        // Map tools
-        val lmTools: List<ToolProvider>? = tools?.map { tool ->
+        // Map tools — capture tool calls for JS instead of executing natively
+        val lmTools: List<ToolProvider>? = tools?.map { toolDef ->
             val apiTool = object : OpenApiTool {
                 override fun getToolDescriptionJsonString(): String {
-                    return tool.parametersJson
+                    // SDK expects full OpenAPI tool description with name, description, and parameters
+                    val fullDesc = org.json.JSONObject()
+                    fullDesc.put("name", toolDef.name)
+                    fullDesc.put("description", toolDef.description)
+                    fullDesc.put("parameters", org.json.JSONObject(toolDef.parametersJson))
+                    return fullDesc.toString()
                 }
                 override fun execute(paramsJsonString: String): String {
-                    return "{}"
+                    Log.d(TAG, "Tool called: ${toolDef.name} with args: $paramsJsonString")
+                    pendingToolCalls.add(ToolCall(
+                        name = toolDef.name,
+                        argumentsJson = paramsJsonString
+                    ))
+                    return "{\"status\": \"pending\", \"message\": \"Tool execution delegated to application\"}"
                 }
             }
-            (apiTool as Any) as ToolProvider
+            tool(apiTool)
         }
 
         // Create conversation with explicit SamplerConfig (required by Gallery pattern).
@@ -555,7 +656,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
 
 
-    override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<String> {
+    override fun sendMultimodalMessage(parts: Array<MultimodalPart>): Promise<ExecuteResult> {
         return execute(parts = parts, onToken = null)
     }
 
@@ -567,7 +668,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         val voidPromise = Promise<Unit>()
         try {
             execute(parts, onToken)
-                .then { voidPromise.resolve(Unit) }
+                .then { _ -> voidPromise.resolve(Unit) }
                 .catch { voidPromise.reject(it) }
         } catch (e: Throwable) {
             voidPromise.reject(e)
@@ -582,7 +683,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         val bytes: ByteArray?
     )
 
-    override fun execute(parts: Array<MultimodalPart>, onToken: ((token: String, done: Boolean) -> Unit)?): Promise<String> {
+    override fun execute(parts: Array<MultimodalPart>, onToken: ((token: String, done: Boolean) -> Unit)?): Promise<ExecuteResult> {
         // Preprocess synchronously on the JS/JSI thread to safely extract JS buffer bytes
         val preprocessed = parts.map { part ->
             val bytes = when (part.type) {
@@ -610,6 +711,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
         return Promise.parallel {
             ensureLoaded()
+            // Clear any previous tool calls before new inference
+            pendingToolCalls.clear()
 
             val tempFiles = mutableListOf<java.io.File>()
 
@@ -625,7 +728,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         }
                         PartType.IMAGE -> {
                             val imagePath = when {
-                                part.path != null -> part.path
+                                part.path != null -> {
+                                    val resolved = resolveAssetUri(part.path, "jpg")
+                                    if (resolved != part.path) tempFiles.add(java.io.File(resolved))
+                                    resolved
+                                }
                                 part.bytes != null -> {
                                     val tmp = java.io.File(
                                         LiteRTLMInitProvider.applicationContext!!.cacheDir,
@@ -646,7 +753,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         }
                         PartType.AUDIO -> {
                             val audioPath = when {
-                                part.path != null -> part.path
+                                part.path != null -> {
+                                    val resolved = resolveAssetUri(part.path, "wav")
+                                    if (resolved != part.path) tempFiles.add(java.io.File(resolved))
+                                    resolved
+                                }
                                 part.bytes != null -> {
                                     val tmp = java.io.File(
                                         LiteRTLMInitProvider.applicationContext!!.cacheDir,
@@ -671,11 +782,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                 val userMsg = LiteRTMessage.user(Contents.of(contents))
 
+                val extraContext: Map<String, String> = if (enableThinking) mapOf("enable_thinking" to "true") else emptyMap()
+
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
                     val errorRef = AtomicReference<Throwable?>(null)
                     val fullResponseBuilder = StringBuilder()
+                    val thinkingBuilder = StringBuilder()
 
                     val listener = StreamingCallbackListener(
                         onToken = { token, done ->
@@ -683,6 +797,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             if (done) latch.countDown()
                         },
                         responseBuilder = fullResponseBuilder,
+                        thinkingBuilder = thinkingBuilder,
                         history = history,
                         userMessage = userTextRepresentation,
                         onStatsReady = { stats -> lastStats = stats },
@@ -690,7 +805,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     )
 
                     try {
-                        conversation!!.sendMessageAsync(message = userMsg, callback = listener)
+                        conversation!!.sendMessageAsync(message = userMsg, callback = listener, extraContext = extraContext)
                     } catch (e: Exception) {
                         Log.e(TAG, "execute streaming failed", e)
                         errorRef.set(e)
@@ -700,17 +815,26 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                     latch.await()
                     errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
-                    fullResponseBuilder.toString()
+                    val capturedToolCalls = synchronized(pendingToolCalls) {
+                        pendingToolCalls.toTypedArray().also { pendingToolCalls.clear() }
+                    }
+                    ExecuteResult(
+                        text = fullResponseBuilder.toString(),
+                        toolCalls = capturedToolCalls,
+                        thinkingText = thinkingBuilder.toString()
+                    )
 
                 } else {
                     // ── Blocking path ─────────────────────────────────────────────────
                     val startTime = System.nanoTime()
-                    val responseMsg = conversation!!.sendMessage(message = userMsg)
+                    val responseMsg = conversation!!.sendMessage(message = userMsg, extraContext = extraContext)
                     val elapsedMs = (System.nanoTime() - startTime) / 1_000_000.0
 
                     val response = responseMsg.contents.contents
                         .filterIsInstance<Content.Text>()
                         .joinToString("") { it.text }
+
+                    val thinkingText = responseMsg.channels["thought"] ?: ""
 
                     history.add(Message(Role.MODEL, response))
 
@@ -724,7 +848,14 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         totalTime = elapsedMs,
                         tokensPerSecond = if (elapsedMs > 0) completionTokens / (elapsedMs / 1000.0) else 0.0
                     )
-                    response
+                    val capturedToolCalls = synchronized(pendingToolCalls) {
+                        pendingToolCalls.toTypedArray().also { pendingToolCalls.clear() }
+                    }
+                    ExecuteResult(
+                        text = response,
+                        toolCalls = capturedToolCalls,
+                        thinkingText = thinkingText
+                    )
                 }
             } finally {
                 // Clean up all temp files created during this execute call
@@ -735,6 +866,20 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 }
             }
         }
+    }
+
+    override fun sendToolResponse(
+        responses: Array<ToolResponse>,
+        onToken: ((token: String, done: Boolean) -> Unit)?
+    ): Promise<ExecuteResult> {
+        // Format tool results as a message and send to the conversation
+        val toolResultText = responses.joinToString("\n") { response ->
+            "Tool '${response.name}' result: ${response.responseJson}"
+        }
+        return execute(
+            parts = arrayOf(MultimodalPartFactories.textPart(toolResultText)),
+            onToken = onToken
+        )
     }
 
     override fun countTokens(text: String): Double {

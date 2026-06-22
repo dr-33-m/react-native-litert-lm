@@ -30,6 +30,38 @@ export interface ToolDefinition {
 }
 
 /**
+ * A tool call requested by the model during inference.
+ */
+export interface ToolCall {
+  /** Name of the tool the model wants to call */
+  name: string;
+  /** JSON string of the arguments the model passed to the tool */
+  argumentsJson: string;
+}
+
+/**
+ * A tool response to send back to the model after executing a tool call.
+ */
+export interface ToolResponse {
+  /** Name of the tool that was executed */
+  name: string;
+  /** JSON string of the tool execution result */
+  responseJson: string;
+}
+
+/**
+ * Result from execute() containing both text and any tool calls.
+ */
+export interface ExecuteResult {
+  /** The model's text response */
+  text: string;
+  /** Tool calls requested by the model (empty array if none) */
+  toolCalls: ToolCall[];
+  /** The model's internal thinking/reasoning text (empty string if thinking is disabled) */
+  thinkingText: string;
+}
+
+/**
  * The part type for a multimodal message content part.
  */
 export type PartType = "text" | "image" | "audio";
@@ -146,6 +178,14 @@ export interface LLMConfig {
    * @default false
    */
   enableSpeculativeDecoding?: boolean;
+
+  /**
+   * Whether to enable thinking/reasoning mode.
+   * When enabled, the model generates internal reasoning before the final response.
+   * The thinking text is available in ExecuteResult.thinkingText and streamed via onThinkingToken.
+   * @default false
+   */
+  enableThinking?: boolean;
 }
 
 /**
@@ -226,17 +266,17 @@ export interface LiteRTLM extends HybridObject<{
   /**
    * Send a text message and get the complete response (blocking).
    * @param message User message text.
-   * @returns The model's response text.
+   * @returns ExecuteResult with text and any tool calls.
    */
-  sendMessage(message: string): Promise<string>;
+  sendMessage(message: string): Promise<ExecuteResult>;
 
   /**
    * Send a text message with an image (multimodal).
    * @param message User message text.
    * @param imagePath Absolute path to an image file.
-   * @returns The model's response text.
+   * @returns ExecuteResult with text and any tool calls.
    */
-  sendMessageWithImage(message: string, imagePath: string): Promise<string>;
+  sendMessageWithImage(message: string, imagePath: string): Promise<ExecuteResult>;
 
   /**
    * Send a text message with an image and get a streaming response.
@@ -271,7 +311,7 @@ export interface LiteRTLM extends HybridObject<{
    * @param audioPath Absolute path to an audio file (WAV).
    * @returns The model's response text.
    */
-  sendMessageWithAudio(message: string, audioPath: string): Promise<string>;
+  sendMessageWithAudio(message: string, audioPath: string): Promise<ExecuteResult>;
 
   /**
    * Send a text message with audio and get a streaming response.
@@ -291,7 +331,7 @@ export interface LiteRTLM extends HybridObject<{
    * @param parts The message content parts (text, image, and/or audio).
    * @returns The model's response text.
    */
-  sendMultimodalMessage(parts: MultimodalPart[]): Promise<string>;
+  sendMultimodalMessage(parts: MultimodalPart[]): Promise<ExecuteResult>;
 
   /**
    * Send a message with streaming response.
@@ -346,12 +386,39 @@ export interface LiteRTLM extends HybridObject<{
    *
    * @param parts Array of content parts (text, image, audio)
    * @param onToken Optional streaming callback - invoked per token with (token, isDone)
-   * @returns Promise resolving to the full response string
+   * @returns Promise resolving to ExecuteResult with text and any tool calls
    */
   execute(
     parts: MultimodalPart[],
     onToken?: (token: string, done: boolean) => void,
-  ): Promise<string>;
+  ): Promise<ExecuteResult>;
+
+  /**
+   * Send tool execution results back to the model to continue generation.
+   * Call this after receiving tool calls from execute() and executing them.
+   *
+   * @param responses Array of tool responses with name and result JSON
+   * @param onToken Optional streaming callback
+   * @returns Promise resolving to ExecuteResult (may contain further tool calls)
+   */
+  sendToolResponse(
+    responses: ToolResponse[],
+    onToken?: (token: string, done: boolean) => void,
+  ): Promise<ExecuteResult>;
+
+  /**
+   * Get the backend the engine is actually using after initialization.
+   * If GPU was requested but unavailable, this returns 'cpu' after fallback.
+   * Returns the requested backend before loadModel is called.
+   */
+  getActiveBackend(): Backend;
+
+  /**
+   * Cancel any in-progress inference.
+   * Partial output generated so far is preserved.
+   * No-op if nothing is generating.
+   */
+  stopGeneration(): void;
 
   /**
    * Release all native resources.

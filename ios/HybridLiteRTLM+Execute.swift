@@ -44,8 +44,8 @@ extension HybridLiteRTLM {
         return voidPromise
     }
 
-    public func execute(parts: [MultimodalPart], onToken: ((_ token: String, _ done: Bool) -> Void)?) throws -> Promise<String> {
-        let promise = Promise<String>()
+    public func execute(parts: [MultimodalPart], onToken: ((_ token: String, _ done: Bool) -> Void)?) throws -> Promise<ExecuteResult> {
+        let promise = Promise<ExecuteResult>()
 
         // Preprocess all JSI-bound data on the caller thread synchronously
         var preprocessed: [PreprocessedPart] = []
@@ -219,7 +219,7 @@ extension HybridLiteRTLM {
         conversation: OpaquePointer,
         msgJson: String,
         userLabel: String,
-        promise: Promise<String>,
+        promise: Promise<ExecuteResult>,
         cleanup: @escaping () -> Void
     ) {
         let startTime = Date()
@@ -245,7 +245,8 @@ extension HybridLiteRTLM {
             tokenCount: 0
         )
         cleanup()
-        promise.resolve(withResult: result)
+        // iOS: tool calls not yet captured from C API — return empty array
+        promise.resolve(withResult: ExecuteResult(text: result, toolCalls: [], thinkingText: ""))
     }
 
 
