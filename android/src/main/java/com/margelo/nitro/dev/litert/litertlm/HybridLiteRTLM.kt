@@ -58,6 +58,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         /** Cached result of OpenCL availability probe (null = not yet checked). */
         @Volatile
         private var openCLAvailable: Boolean? = null
+
+        /** Cached result of NPU/QNN availability probe (null = not yet checked). */
+        @Volatile
+        private var npuAvailable: Boolean? = null
         
         /**
          * Initialize the native library.
@@ -163,9 +167,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 try {
                     // Early GPU hardware check: probe for OpenCL library.
                     // LiteRT-LM's GPU delegate requires OpenCL, which is absent on
-                    // most Samsung/Qualcomm devices. Log a warning — fallback will
-                    // handle it gracefully below.
-                    if (backend == Backend.GPU) {
+                    // most Samsung/Qualcomm devices. Probe once and cache the result —
+                    // needed for both GPU main backend and multimodal vision backend.
+                    if (openCLAvailable == null) {
                         val hasOpenCL = openCLAvailable ?: run {
                             val result = try {
                                 System.loadLibrary("OpenCL")
@@ -194,6 +198,41 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             Log.w(TAG, "OpenCL library not found — GPU backend will likely fail, fallback chain will attempt CPU")
                         } else {
                             Log.i(TAG, "OpenCL library found — GPU backend is available")
+                        }
+                    }
+
+                    // NPU hardware check: probe for QNN HTP runtime libraries.
+                    // LiteRT-LM's NPU delegate requires Qualcomm QNN HTP (Hexagon Tensor
+                    // Processor) runtime. Without it, Engine() crashes with SIGSEGV
+                    // that Kotlin's try/catch cannot intercept.
+                    // Unlike GPU (which throws a catchable Java exception on failure),
+                    // NPU failure is a native crash — so we MUST detect before attempting.
+                    if (npuAvailable == null) {
+                        val hasNpu = run {
+                            // Check for QNN HTP libraries in system vendor paths.
+                            // These are only present on devices with Qualcomm NPU support.
+                            val qnnPaths = arrayOf(
+                                "/vendor/lib64/libQnnHtp.so",
+                                "/vendor/lib/libQnnHtp.so",
+                                "/system/vendor/lib64/libQnnHtp.so",
+                                "/system/lib64/libQnnHtp.so",
+                                "/vendor/lib64/libQnnSystem.so",
+                                "/vendor/lib/libQnnSystem.so"
+                            )
+                            var found = false
+                            for (path in qnnPaths) {
+                                if (java.io.File(path).exists()) {
+                                    found = true
+                                    break
+                                }
+                            }
+                            found
+                        }
+                        npuAvailable = hasNpu
+                        if (!hasNpu) {
+                            Log.w(TAG, "QNN HTP libraries not found — NPU backend unavailable")
+                        } else {
+                            Log.i(TAG, "QNN HTP libraries found — NPU backend may be available")
                         }
                     }
 
@@ -244,17 +283,39 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         }
                     }
 
-                    // Map our Backend enum to LiteRT-LM Backend sealed class
+                    // Map our Backend enum to LiteRT-LM Backend sealed class.
+                    // If hardware is unavailable, skip directly to CPU to avoid native
+                    // crashes (SIGSEGV) that Kotlin's try/catch cannot intercept.
                     val lmBackend = when (backend) {
-                        Backend.GPU -> com.google.ai.edge.litertlm.Backend.GPU()
+                        Backend.GPU -> {
+                            val hasOpenCL = openCLAvailable ?: false
+                            if (hasOpenCL) {
+                                com.google.ai.edge.litertlm.Backend.GPU()
+                            } else {
+                                Log.w(TAG, "GPU requested but OpenCL unavailable — using CPU directly")
+                                backend = Backend.CPU
+                                com.google.ai.edge.litertlm.Backend.CPU()
+                            }
+                        }
                         Backend.NPU -> {
-                            Log.i(TAG, "NPU backend requested - requires hardware support")
-                            com.google.ai.edge.litertlm.Backend.NPU()
+                            val hasNpu = npuAvailable ?: false
+                            val nativeLibDir = LiteRTLMInitProvider.applicationContext?.applicationInfo?.nativeLibraryDir
+                            Log.i(TAG, "NPU backend requested - available=$hasNpu, nativeLibraryDir=$nativeLibDir")
+                            if (hasNpu && nativeLibDir != null) {
+                                com.google.ai.edge.litertlm.Backend.NPU(nativeLibraryDir = nativeLibDir)
+                            } else {
+                                Log.w(TAG, "NPU requested but hardware unavailable — using CPU directly")
+                                backend = Backend.CPU
+                                com.google.ai.edge.litertlm.Backend.CPU()
+                            }
                         }
                         else -> com.google.ai.edge.litertlm.Backend.CPU()
                     }
 
-                    val lmVisionBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null
+                    val lmVisionBackend = if (isMultimodal) {
+                        if (openCLAvailable == true) com.google.ai.edge.litertlm.Backend.GPU()
+                        else com.google.ai.edge.litertlm.Backend.CPU()
+                    } else null
                     val lmAudioBackend = if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
     
                     Log.i(TAG, "Backend config: main=$lmBackend, vision=$lmVisionBackend, audio=$lmAudioBackend, multimodal=$isMultimodal")
@@ -558,6 +619,18 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
     }
 
+    override fun checkModelCapabilities(modelPath: String): ModelCapabilities {
+        var supportsSpeculativeDecoding = false
+        try {
+            com.google.ai.edge.litertlm.Capabilities(modelPath).use {
+                supportsSpeculativeDecoding = it.hasSpeculativeDecodingSupport()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "checkModelCapabilities: failed to query capabilities: ${e.message}")
+        }
+        return ModelCapabilities(supportsSpeculativeDecoding = supportsSpeculativeDecoding)
+    }
+
     override fun getActiveBackend(): Backend = backend
 
     override fun stopGeneration() {
@@ -629,10 +702,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             tool(apiTool)
         }
 
-        // Create conversation with explicit SamplerConfig (required by Gallery pattern).
-        // GPU backend may fail silently without proper sampler params.
+        // Create conversation config. NPU backend does not support SamplerConfig
+        // (matching Gallery app pattern — setting sampler params on NPU causes crashes).
         val convConfig = ConversationConfig(
-            samplerConfig = SamplerConfig(
+            samplerConfig = if (backend == Backend.NPU) null else SamplerConfig(
                 topK = topK,
                 topP = topP.toDouble(),
                 temperature = temperature.toDouble(),

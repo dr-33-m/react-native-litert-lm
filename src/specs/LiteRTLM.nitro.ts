@@ -233,6 +233,15 @@ export interface MemoryUsage {
 }
 
 /**
+ * Model capability flags queried from the model file at runtime.
+ * Uses the LiteRT-LM Capabilities API to inspect compiled model metadata.
+ */
+export interface ModelCapabilities {
+  /** Whether the model binary supports multi-token prediction (speculative decoding). */
+  supportsSpeculativeDecoding: boolean;
+}
+
+/**
  * LiteRT-LM: High-performance LLM inference engine.
  * Supports Gemma 4, Gemma 3n, Phi-4, Qwen, and other .litertlm models.
  *
@@ -419,6 +428,14 @@ export interface LiteRTLM extends HybridObject<{
    * No-op if nothing is generating.
    */
   stopGeneration(): void;
+
+  /**
+   * Query model capabilities from the compiled model file.
+   * Does NOT require loadModel() — reads metadata directly from disk.
+   * @param modelPath Absolute path to the .litertlm model file.
+   * @returns Capabilities flags (e.g. speculative decoding support).
+   */
+  checkModelCapabilities(modelPath: string): ModelCapabilities;
 
   /**
    * Release all native resources.

@@ -142,6 +142,13 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         )
     }
     
+    public func checkModelCapabilities(modelPath: String) throws -> ModelCapabilities {
+        // iOS LiteRT-LM C API doesn't expose a Capabilities class like Android.
+        // Return safe defaults — speculative decoding support can be detected
+        // at engine init time on iOS.
+        return ModelCapabilities(supportsSpeculativeDecoding: false)
+    }
+
     public func getActiveBackend() throws -> Backend {
         return backend
     }

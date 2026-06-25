@@ -18,6 +18,7 @@ export type {
   Role,
   GenerationStats,
   MemoryUsage,
+  ModelCapabilities,
   /** New in v0.5: pass to execute() instead of individual send methods */
   MultimodalPart,
   PartType,
