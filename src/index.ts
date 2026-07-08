@@ -8,6 +8,7 @@ import type {
   Role,
   GenerationStats,
   MemoryUsage,
+  ModelStore,
 } from "./specs/LiteRTLM.nitro";
 
 export type {
@@ -123,6 +124,36 @@ export function getRecommendedBackend(): Backend {
   // CPU is the safe default — always available, broadly compatible.
   // GPU is faster but may fail on some models/devices.
   return "cpu";
+}
+
+let nativeAvailable: boolean | null = null;
+
+/**
+ * Check whether the native LiteRT-LM module loaded successfully on this
+ * device. Some devices (unsupported ABI, missing native libs) can't load
+ * the native module at all — call this before showing any on-device AI UI
+ * so those devices degrade gracefully instead of throwing when a model is
+ * loaded. Result is cached after the first call.
+ *
+ * @returns true if native inference is available on this device
+ *
+ * @example
+ * ```typescript
+ * if (!isNativeAvailable()) {
+ *   // hide/disable on-device AI features
+ * }
+ * ```
+ */
+export function isNativeAvailable(): boolean {
+  if (nativeAvailable === null) {
+    try {
+      NitroModules.createHybridObject<ModelStore>("ModelStore");
+      nativeAvailable = true;
+    } catch {
+      nativeAvailable = false;
+    }
+  }
+  return nativeAvailable;
 }
 
 /**

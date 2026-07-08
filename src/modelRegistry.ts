@@ -9,7 +9,17 @@ export interface ModelDownloadOptions {
   onProgress?: (progress: number) => void;
 }
 
-const nativeStore = NitroModules.createHybridObject<ModelStore>("ModelStore");
+let nativeStore: ModelStore | null = null;
+
+// Lazily created — a module-scope createHybridObject() would throw at import
+// time on devices where the native lib failed to load, crashing app startup
+// before any capability check can run.
+function getStore(): ModelStore {
+  if (!nativeStore) {
+    nativeStore = NitroModules.createHybridObject<ModelStore>("ModelStore");
+  }
+  return nativeStore;
+}
 
 /**
  * High-performance Model Registry for react-native-litert-lm.
@@ -26,7 +36,7 @@ export const ModelRegistry = {
    * @returns true if cached and has size > 0
    */
   isCached(pathOrUrl: string): boolean {
-    return nativeStore.isCached(resolveModelFileName(pathOrUrl));
+    return getStore().isCached(resolveModelFileName(pathOrUrl));
   },
 
   /**
@@ -37,7 +47,7 @@ export const ModelRegistry = {
    * @returns The absolute local path
    */
   getFilePath(pathOrUrl: string): string {
-    return nativeStore.getFilePath(resolveModelFileName(pathOrUrl));
+    return getStore().getFilePath(resolveModelFileName(pathOrUrl));
   },
 
   /**
@@ -46,7 +56,7 @@ export const ModelRegistry = {
    * @returns Array of ModelFile descriptors containing path, size, and mod time
    */
   listCachedFiles(): ModelFile[] {
-    return nativeStore.listCachedFiles();
+    return getStore().listCachedFiles();
   },
 
   /**
@@ -56,7 +66,7 @@ export const ModelRegistry = {
    * @param pathOrUrl Filename, local path, or download URL to delete
    */
   deleteFile(pathOrUrl: string): void {
-    nativeStore.deleteFile(resolveModelFileName(pathOrUrl));
+    getStore().deleteFile(resolveModelFileName(pathOrUrl));
   },
 
   /**
@@ -89,7 +99,7 @@ export const ModelRegistry = {
 
       const headersJson = options?.headers ? JSON.stringify(options.headers) : "{}";
       
-      return nativeStore.downloadFile(
+      return getStore().downloadFile(
         cleanPath,
         fileName,
         headersJson,
