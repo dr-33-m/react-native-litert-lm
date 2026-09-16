@@ -1,10 +1,10 @@
 {
   "name": "@dr33m/react-native-litert-lm",
-  "version": "0.5.5",
+  "version": "0.6.7",
   "litertLm": {
-    "version": "0.12.0",
-    "androidMavenVersion": "0.12.0",
-    "iosGitTag": "v0.12.0"
+    "version": "0.15.0",
+    "androidMavenVersion": "0.15.0",
+    "iosGitTag": "v0.15.0"
   },
   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",
   "license": "MIT",

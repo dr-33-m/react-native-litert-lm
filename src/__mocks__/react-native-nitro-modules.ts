@@ -81,6 +81,7 @@ export const mockLiteRTLM = {
   ),
   getHistory: jest.fn(() => []),
   resetConversation: jest.fn(),
+  resetConversationWith: jest.fn(),
   getStats: jest.fn(() => ({
     promptTokens: 10,
     completionTokens: 20,

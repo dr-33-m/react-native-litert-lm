@@ -20,7 +20,10 @@ class LiteRTLMInitProvider : ContentProvider() {
         
         applicationContext?.registerComponentCallbacks(object : android.content.ComponentCallbacks2 {
             override fun onTrimMemory(level: Int) {
-                if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+                // Trim levels are event codes, not severities: a `>=` gate here
+                // matched TRIM_MEMORY_UI_HIDDEN (20), which fires on every screen
+                // lock, and dropped the loaded engine along with it.
+                if (com.margelo.nitro.dev.litert.litertlm.LiteRTLMRegistry.isMemoryEmergency(level)) {
                     com.margelo.nitro.dev.litert.litertlm.LiteRTLMRegistry.onTrimMemory(level)
                 }
             }

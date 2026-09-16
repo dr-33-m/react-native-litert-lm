@@ -50,7 +50,46 @@ class HybridLiteRTLMTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(mem.nativeHeapBytes, 0.0)
             XCTAssertGreaterThanOrEqual(mem.residentBytes, 0.0)
             XCTAssertGreaterThanOrEqual(mem.availableMemoryBytes, 0.0)
+            // The Simulator reports 0 headroom; that must not read as pressure.
+            if mem.availableMemoryBytes == 0 {
+                XCTAssertFalse(mem.isLowMemory)
+            }
         }
+    }
+
+    func testParseEngineMessageReadsText() {
+        let msg = bridge.parseEngineMessage(
+            #"{"role":"assistant","content":[{"type":"text","text":"Hello"}]}"#)
+        XCTAssertEqual(msg.text, "Hello")
+        XCTAssertTrue(msg.toolCalls.isEmpty)
+        XCTAssertEqual(msg.thinking, "")
+    }
+
+    func testParseEngineMessageReadsToolCallsWithoutLeakingJson() {
+        let msg = bridge.parseEngineMessage(
+            #"{"role":"assistant","tool_calls":[{"type":"function","function":{"name":"list_collections","arguments":{}}}]}"#)
+        XCTAssertEqual(msg.text, "")
+        XCTAssertEqual(msg.toolCalls.count, 1)
+        XCTAssertEqual(msg.toolCalls.first?.name, "list_collections")
+        XCTAssertEqual(msg.toolCalls.first?.argumentsJson, "{}")
+    }
+
+    func testParseEngineMessageReadsThinkingChannel() {
+        let msg = bridge.parseEngineMessage(
+            #"{"role":"assistant","channels":{"thought":"Let me check."}}"#)
+        XCTAssertEqual(msg.text, "")
+        XCTAssertEqual(msg.thinking, "Let me check.")
+    }
+
+    func testParseEngineMessagePassesPlainTextThrough() {
+        XCTAssertEqual(bridge.parseEngineMessage("plain words").text, "plain words")
+    }
+
+    func testLowMemoryTreatsZeroReadingAsUnknown() {
+        let mb = 1024.0 * 1024.0
+        XCTAssertFalse(HybridLiteRTLM.isLowMemory(availableBytes: 0))
+        XCTAssertTrue(HybridLiteRTLM.isLowMemory(availableBytes: 100 * mb))
+        XCTAssertFalse(HybridLiteRTLM.isLowMemory(availableBytes: 1024 * mb))
     }
 
     func testSendMessageAsyncRejectsWithoutModel() async throws {

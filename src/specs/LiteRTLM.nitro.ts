@@ -222,13 +222,19 @@ export interface GenerationStats {
  * Measured from OS-level APIs, not estimated.
  */
 export interface MemoryUsage {
-  /** Native heap allocated bytes (Debug.getNativeHeapAllocatedSize on Android, malloc_size on iOS) */
+  /**
+   * Native heap allocated bytes (Debug.getNativeHeapAllocatedSize on Android).
+   * iOS has no equivalent and reports RSS here, the same as `residentBytes`.
+   */
   nativeHeapBytes: number;
   /** Total process resident set size (RSS) in bytes */
   residentBytes: number;
-  /** Available system memory in bytes */
+  /**
+   * Available memory in bytes: system available memory on Android, Jetsam
+   * headroom on iOS. 0 means no reading (the iOS Simulator always reports 0).
+   */
   availableMemoryBytes: number;
-  /** Whether the system considers memory low */
+  /** Whether memory is low. Always false when there is no reading. */
   isLowMemory: boolean;
 }
 
@@ -363,6 +369,24 @@ export interface LiteRTLM extends HybridObject<{
    * Clear the conversation context and start fresh.
    */
   resetConversation(): void;
+
+  /**
+   * Clear the conversation and re-seed it with prior turns.
+   *
+   * The engine allocates one KV cache per conversation, sized by
+   * `maxContextTokens`. Long tool-calling sessions fill it, and overflowing it
+   * aborts the process rather than raising a catchable error. Recreating the
+   * conversation frees the cache, but `resetConversation()` alone also throws
+   * away the thread.
+   *
+   * This seeds the fresh conversation with `messages` as prior context, so a
+   * caller can drop the oldest turns and keep the recent ones. The system
+   * prompt and tools configured at `loadModel` are reapplied automatically.
+   * No generation is triggered and no reply is produced.
+   *
+   * @param messages Prior turns, oldest first.
+   */
+  resetConversationWith(messages: Message[]): void;
 
   /**
    * Check if a model is loaded and ready for inference.

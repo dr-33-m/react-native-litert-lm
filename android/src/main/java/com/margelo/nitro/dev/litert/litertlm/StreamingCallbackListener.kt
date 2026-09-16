@@ -18,6 +18,8 @@ internal class StreamingCallbackListener(
     private val onStatsReady: (GenerationStats) -> Unit,
     private val onFailure: ((Throwable) -> Unit)? = null,
     private val onThinkingToken: ((String) -> Unit)? = null,
+    /** Tool calls the engine parsed out of this reply. They arrive on the final message. */
+    private val onToolCalls: ((List<com.google.ai.edge.litertlm.ToolCall>) -> Unit)? = null,
 ) : com.google.ai.edge.litertlm.MessageCallback {
 
     private val startTime = System.nanoTime()
@@ -28,6 +30,8 @@ internal class StreamingCallbackListener(
         val chunk = message.contents.contents
             .filterIsInstance<Content.Text>()
             .joinToString("") { it.text }
+
+        if (message.toolCalls.isNotEmpty()) onToolCalls?.invoke(message.toolCalls)
 
         // Capture thinking from the "thought" channel
         val thinkingChunk = message.channels["thought"]

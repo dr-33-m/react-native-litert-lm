@@ -55,6 +55,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     private var systemPrompt: String?
     private var tools: [ToolDefinition]?
     private var enableSpeculativeDecoding: Bool = false
+    private var enableThinking: Bool = false
     
     /// Approximate model weight size to inform the JS engine's garbage collection.
     public var memorySize: Int {
@@ -92,6 +93,26 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         }
     }
     
+    public func resetConversationWith(messages: [Message]) throws {
+        queue.sync {
+            history = messages
+            lastStats = GenerationStats(
+                promptTokens: 0.0,
+                completionTokens: 0.0,
+                totalTokens: 0.0,
+                timeToFirstToken: 0.0,
+                totalTime: 0.0,
+                tokensPerSecond: 0.0
+            )
+            if isLoaded && engine != nil {
+                // Recreating the conversation is what actually frees the old KV
+                // cache; the seed is replayed into the new one without
+                // triggering generation.
+                createNewConversation(initialMessages: messages)
+            }
+        }
+    }
+
     public func getStats() throws -> GenerationStats {
         return queue.sync { lastStats }
     }
@@ -111,9 +132,18 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     }
     
     public func getMemoryUsage() throws -> MemoryUsage {
+        return Self.currentMemoryUsage()
+    }
+
+    /// Shared by the public `getMemoryUsage()` override and the pre-flight
+    /// guard in `HybridLiteRTLM+Execute.swift` — both need the same real,
+    /// OS-level reading, not an estimate. `static` since it needs no
+    /// instance state, which also makes it trivially callable from the
+    /// extension file.
+    static func currentMemoryUsage() -> MemoryUsage {
         var residentBytes: Double = 0.0
         var nativeHeapBytes: Double = 0.0
-        
+
         // Retrieve process resident set size (RSS) via Mach basic task info
         var info = mach_task_basic_info()
         var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
@@ -122,24 +152,38 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
             }
         }
-        
+
         if kerr == KERN_SUCCESS {
             residentBytes = Double(info.resident_size)
+            // iOS has no cheap native-heap figure equivalent to Android's
+            // Debug.getNativeHeapAllocatedSize, so this aliases RSS. The two
+            // fields are identical on iOS by design, not by accident.
             nativeHeapBytes = Double(info.resident_size)
         }
-        
-        // os_proc_available_memory reports actual headroom available before Jetsam termination (iOS 13+)
+
+        // os_proc_available_memory reports headroom before Jetsam termination
+        // (iOS 13+). Jetsam exists only on a real device; the Simulator is an
+        // ordinary macOS process and gets 0.
         let availableBytes = Double(os_proc_available_memory())
-        
-        // Flag memory warning at ~200MB remaining headroom
-        let isLowMemory = availableBytes < 200.0 * 1024.0 * 1024.0
-        
+
         return MemoryUsage(
             nativeHeapBytes: nativeHeapBytes,
             residentBytes: residentBytes,
             availableMemoryBytes: availableBytes,
-            isLowMemory: isLowMemory
+            isLowMemory: isLowMemory(availableBytes: availableBytes)
         )
+    }
+
+    /// Low memory means under ~200MB of Jetsam headroom.
+    ///
+    /// A zero reading is the absence of a measurement, not the absence of
+    /// memory: read as pressure, it rejected every execute() on the Simulator
+    /// with 507. Treated as unknown instead, which is what Android does when
+    /// ActivityManager is unreachable and what the JS headroom check does with
+    /// the same zero. The cost is no memory guard where nothing can be
+    /// measured, which is right for a Simulator.
+    static func isLowMemory(availableBytes: Double) -> Bool {
+        return availableBytes > 0 && availableBytes < 200.0 * 1024.0 * 1024.0
     }
     
     public func checkModelCapabilities(modelPath: String) throws -> ModelCapabilities {
@@ -194,9 +238,11 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
                 if let s = config.systemPrompt { self.systemPrompt = s }
                 self.tools = config.tools
                 self.enableSpeculativeDecoding = config.enableSpeculativeDecoding ?? false
+                self.enableThinking = config.enableThinking ?? false
             } else {
                 self.tools = nil
                 self.enableSpeculativeDecoding = false
+                self.enableThinking = false
             }
             
             // Map main backend string
@@ -210,7 +256,9 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             var rawEngine: OpaquePointer? = nil
             
             // Set LiteRT C Log Level to WARNING (2) for clean production output
-            litert_lm_set_min_log_level(2)
+            // v0.15: takes a typed LiteRtLmLogSeverity (previously a raw int,
+            // where 2 was INFO — WARNING is the intended level).
+            litert_lm_set_min_log_level(kLiteRtLmLogSeverityWarning)
             
             // Creation helper with scoped FFI pointer lifetime
             let createEngine = { (main: String, vision: String?, audio: String?) -> OpaquePointer? in
@@ -384,7 +432,7 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
     
     // MARK: - Internal Engine Helpers
     
-    private func createNewConversation() {
+    private func createNewConversation(initialMessages: [Message] = []) {
         guard let engine = self.engine else { return }
         
         if let oldConv = self.conversation {
@@ -400,18 +448,32 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         
         litert_lm_session_config_set_max_output_tokens(sessionConfig, Int32(self.maxOutputTokens))
         
-        var sampler = LiteRtLmSamplerParams()
-        sampler.type = kLiteRtLmSamplerTypeTopP
-        sampler.top_k = Int32(self.topK)
-        sampler.top_p = Float(self.topP)
-        sampler.temperature = Float(self.temperature)
-        sampler.seed = 0
-        withUnsafePointer(to: &sampler) { samplerPtr in
-            litert_lm_session_config_set_sampler_params(sessionConfig, samplerPtr)
-        }
+        // v0.15: sampler params are opaque — built through create/setters
+        // instead of a stack struct. set_sampler_params copies the values into
+        // the session config, so the params can be freed when this scope ends.
+        guard let sampler = litert_lm_sampler_params_create(kLiteRtLmSamplerTypeTopP) else { return }
+        defer { litert_lm_sampler_params_delete(sampler) }
+        litert_lm_sampler_params_set_top_k(sampler, Int32(self.topK))
+        litert_lm_sampler_params_set_top_p(sampler, Float(self.topP))
+        litert_lm_sampler_params_set_temperature(sampler, Float(self.temperature))
+        litert_lm_sampler_params_set_seed(sampler, 0)
+        litert_lm_session_config_set_sampler_params(sessionConfig, sampler)
         
         litert_lm_conversation_config_set_session_config(convConfig, sessionConfig)
-        
+
+        // Always stated, never omitted, for the reason Android passes
+        // `enable_thinking` on every message: chat templates test it as
+        // "defined and false", so leaving it out lets a reasoning model reason
+        // whatever the setting says. The engine writes it into the template
+        // context as a real boolean, and when on, routes reasoning to the
+        // model's thinking channel (`channels` in each message). The value is
+        // copied into the conversation config, so this can be freed after.
+        if let thinkingConfig = litert_lm_thinking_config_create() {
+            defer { litert_lm_thinking_config_delete(thinkingConfig) }
+            litert_lm_thinking_config_set_enable_thinking(thinkingConfig, self.enableThinking)
+            litert_lm_conversation_config_set_thinking_config(convConfig, thinkingConfig)
+        }
+
         if let systemPrompt = self.systemPrompt {
             let systemMsgJson = "{\"role\":\"system\",\"content\":\"" + escapeJson(systemPrompt) + "\"}"
             systemMsgJson.withCString { systemMsgC in
@@ -437,6 +499,24 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
             }
         }
         
+        if !initialMessages.isEmpty {
+            let payload = initialMessages.map { msg -> [String: String] in
+                let role: String
+                switch msg.role {
+                case .model: role = "model"
+                case .system: role = "system"
+                default: role = "user"
+                }
+                return ["role": role, "content": msg.content]
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+               let jsonString = String(data: data, encoding: .utf8) {
+                jsonString.withCString { messagesC in
+                    litert_lm_conversation_config_set_messages(convConfig, messagesC)
+                }
+            }
+        }
+
         self.conversation = litert_lm_conversation_create(engine, convConfig)
     }
     
@@ -513,28 +593,77 @@ public class HybridLiteRTLM: HybridLiteRTLMSpec_base, HybridLiteRTLMSpec_protoco
         return chars.count
     }
     
-    func extractTextFromResponse(_ jsonResponse: String) -> String {
-        guard let data = jsonResponse.data(using: .utf8) else {
-            return stripControlTokens(jsonResponse)
+    /// One engine message, split into the three things it can carry.
+    struct EngineMessage {
+        var text = ""
+        var toolCalls: [ToolCall] = []
+        var thinking = ""
+    }
+
+    /// Reads a message the C API returned, whole or as one streamed chunk.
+    ///
+    /// The engine sends JSON of three shapes, often one per chunk:
+    ///   text      {"role":"assistant","content":[{"type":"text","text":"…"}]}
+    ///   thinking  {"role":"assistant","channels":{"thought":"…"}}
+    ///   tool call {"role":"assistant","tool_calls":[{"type":"function",
+    ///              "function":{"name":"…","arguments":{…}}}]}
+    ///
+    /// Only `content` used to be read, and a message without it fell back to
+    /// its raw JSON as text — so every tool call was shown to the reader as
+    /// JSON instead of reaching JS on `toolCalls`, and thinking was lost. This
+    /// mirrors what the Kotlin SDK's `jsonToMessage` gives Android.
+    ///
+    /// Control tokens are left in `text`: a streamed token can be split across
+    /// chunks, so callers strip them from the accumulated text.
+    func parseEngineMessage(_ raw: String) -> EngineMessage {
+        var message = EngineMessage()
+        guard let data = raw.data(using: .utf8),
+              let json = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] else {
+            // Not a message object: plain text.
+            message.text = raw
+            return message
         }
-        do {
-            if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-                if let content = json["content"] {
-                    if let contentString = content as? String {
-                        return stripControlTokens(contentString)
-                    } else if let contentArray = content as? [[String: Any]] {
-                        var textResult = ""
-                        for part in contentArray {
-                            if let type = part["type"] as? String, type == "text", let text = part["text"] as? String {
-                                textResult += text
-                            }
-                        }
-                        return stripControlTokens(textResult)
-                    }
-                }
+
+        if let content = json["content"] as? String {
+            message.text = content
+        } else if let parts = json["content"] as? [[String: Any]] {
+            for part in parts where (part["type"] as? String) == "text" {
+                message.text += (part["text"] as? String) ?? ""
             }
-        } catch {}
-        return stripControlTokens(jsonResponse)
+        }
+
+        if let calls = json["tool_calls"] as? [[String: Any]] {
+            for call in calls {
+                guard let function = call["function"] as? [String: Any],
+                      let name = function["name"] as? String else { continue }
+                message.toolCalls.append(
+                    ToolCall(name: name, argumentsJson: argumentsJson(function["arguments"])))
+            }
+        }
+
+        // Every channel, not only "thought": channel names come from each
+        // model's metadata, and upstream treats the first one as thinking.
+        // Sorted so a message carrying several reads the same every time.
+        if let channels = json["channels"] as? [String: Any] {
+            for key in channels.keys.sorted() {
+                if let text = channels[key] as? String { message.thinking += text }
+            }
+        }
+
+        return message
+    }
+
+    /// Tool arguments as the JSON string JS expects. The engine sends an
+    /// object; a string is passed through in case a model encodes it that way.
+    private func argumentsJson(_ value: Any?) -> String {
+        if let string = value as? String { return string }
+        if let value = value,
+           JSONSerialization.isValidJSONObject(value),
+           let data = try? JSONSerialization.data(withJSONObject: value, options: []),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+        return "{}"
     }
     
     private func withOptionalCString<R>(_ string: String?, _ block: (UnsafePointer<CChar>?) -> R) -> R {

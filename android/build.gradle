@@ -29,7 +29,28 @@ android {
         }
         
         ndk {
-            abiFilters 'arm64-v8a'
+            // Follow the app's `reactNativeArchitectures` rather than pinning
+            // arm64. Pinning it broke x86_64 emulator builds of consuming apps:
+            // this module still configured an arm64-v8a build while the app —
+            // and so the NitroModules prefab it links against — was built
+            // x86_64 only, and LiteRTLM failed to link with undefined
+            // `margelo::nitro::JHybridObject::*` vtable symbols.
+            //
+            // The pin bought nothing: com.google.ai.edge.litertlm ships both
+            // arm64-v8a and x86_64.
+            def supportedAbis = ['arm64-v8a', 'x86_64']
+            def requestedAbis = (project.findProperty('reactNativeArchitectures')
+                    ?: rootProject.findProperty('reactNativeArchitectures')
+                    ?: supportedAbis.join(','))
+                .toString()
+                .split(',')
+                .collect { it.trim() }
+            def selectedAbis = requestedAbis.findAll { supportedAbis.contains(it) }
+            if (selectedAbis.isEmpty()) {
+                selectedAbis = supportedAbis
+            }
+            abiFilters.clear()
+            abiFilters.addAll(selectedAbis)
         }
     }
     

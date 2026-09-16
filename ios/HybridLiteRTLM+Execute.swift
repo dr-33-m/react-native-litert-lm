@@ -80,6 +80,18 @@ extension HybridLiteRTLM {
                 return
             }
 
+            // Refuse rather than risk it: growing the KV-cache under real memory
+            // pressure can fail inside the underlying C engine in a way that
+            // never surfaces as a catchable Swift error — it takes the whole
+            // process down (Jetsam or a hard native failure). An NSError here
+            // is a normal rejected Promise for callers, same contract as any
+            // other execute() failure.
+            if Self.currentMemoryUsage().isLowMemory {
+                promise.reject(withError: NSError(domain: "LiteRTLM", code: 507,
+                    userInfo: [NSLocalizedDescriptionKey: "LiteRTLM: Device memory is critically low; refusing to continue generation."]))
+                return
+            }
+
             let payload: (json: String, tempFiles: [String])
             do { payload = try self.buildExecutePayload(preprocessed) }
             catch { promise.reject(withError: error); return }
@@ -231,11 +243,12 @@ extension HybridLiteRTLM {
         }
         defer { litert_lm_json_response_delete(response) }
 
-        var result = ""
+        var message = EngineMessage()
         if let rs = litert_lm_json_response_get_string(response) {
-            result = extractTextFromResponse(String(cString: rs))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            message = parseEngineMessage(String(cString: rs))
         }
+        let result = stripControlTokens(message.text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         commitExecuteTurn(
             userLabel: userLabel,
@@ -245,8 +258,8 @@ extension HybridLiteRTLM {
             tokenCount: 0
         )
         cleanup()
-        // iOS: tool calls not yet captured from C API — return empty array
-        promise.resolve(withResult: ExecuteResult(text: result, toolCalls: [], thinkingText: ""))
+        promise.resolve(withResult: ExecuteResult(
+            text: result, toolCalls: message.toolCalls, thinkingText: message.thinking))
     }
 
 

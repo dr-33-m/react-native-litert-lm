@@ -130,6 +130,20 @@ export function createLLM(options?: {
         };
       }
 
+      if (prop === "resetConversationWith") {
+        // Absent on native builds older than this JS wrapper, and callers
+        // feature-detect it — so fall through rather than handing back a
+        // wrapper that would fail at the bridge.
+        if (typeof (target as any).resetConversationWith !== "function") {
+          return undefined;
+        }
+        return (messages: unknown[]) => {
+          const result = (target as any).resetConversationWith(messages);
+          recordMemorySnapshot();
+          return result;
+        };
+      }
+
       if (prop === "sendToolResponse") {
         return (responses: any[], onToken?: TokenCallback) => {
           if (onToken) {

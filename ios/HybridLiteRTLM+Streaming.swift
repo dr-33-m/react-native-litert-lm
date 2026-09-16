@@ -20,6 +20,9 @@ class ExecuteStreamContext {
     var fullResponse: String = ""
     var lastEmittedLength: Int = 0
     var tokenCount: Int = 0
+    /// Parsed by the engine; they arrive whole, not token by token.
+    var toolCalls: [ToolCall] = []
+    var thinking: String = ""
 
     init(
         userLabel: String,
@@ -55,12 +58,23 @@ extension HybridLiteRTLM {
         )
         let ptr = Unmanaged.passRetained(ctx).toOpaque()
 
-        let cb: LiteRtLmStreamCallback = { ptr, chunk, isFinal, errorMsg in
-            guard let ptr = ptr else { return }
+        // v0.15: the callback receives an opaque LiteRtLmStreamChunk; text,
+        // finality, and errors are read through accessors. The chunk (and any
+        // string it returns) is only valid for the duration of the call.
+        let cb: LiteRtLmStreamCallback = { ptr, chunk in
+            guard let ptr = ptr, let chunk = chunk else { return }
             let ctx = Unmanaged<ExecuteStreamContext>.fromOpaque(ptr).takeUnretainedValue()
 
-            if let errorMsg = errorMsg {
+            if let errorMsg = litert_lm_stream_chunk_get_error(chunk) {
                 let msg = String(cString: errorMsg)
+                // stopGeneration() ends the stream with a "Task cancelled"
+                // error. That is the reader pressing stop, not a failure:
+                // finish with what streamed so far, as Android does, instead
+                // of writing "Error: …" into the reply.
+                if msg.lowercased().contains("cancel") {
+                    ctx.parent.finalizeExecuteStream(ctx: ctx, streamPtr: ptr)
+                    return
+                }
                 ctx.onToken("Error: \(msg)", true)
                 ctx.cleanup()
                 ctx.promise.reject(withError: NSError(domain: "LiteRTLM", code: 500,
@@ -69,13 +83,13 @@ extension HybridLiteRTLM {
                 return
             }
 
-            if isFinal {
+            if litert_lm_stream_chunk_is_final(chunk) {
                 ctx.parent.finalizeExecuteStream(ctx: ctx, streamPtr: ptr)
                 return
             }
 
-            if let chunk = chunk {
-                ctx.parent.emitExecuteStreamChunk(ctx: ctx, chunk: chunk)
+            if let text = litert_lm_stream_chunk_get_text(chunk) {
+                ctx.parent.emitExecuteStreamChunk(ctx: ctx, chunk: text)
             }
         }
 
@@ -113,17 +127,24 @@ extension HybridLiteRTLM {
             )
             ctx.onToken("", true)
             ctx.cleanup()
-            // iOS: tool calls not yet captured from C API — return empty array
-            ctx.promise.resolve(withResult: ExecuteResult(text: ctx.fullResponse, toolCalls: [], thinkingText: ""))
+            ctx.promise.resolve(withResult: ExecuteResult(
+                text: ctx.fullResponse, toolCalls: ctx.toolCalls, thinkingText: ctx.thinking))
             Unmanaged<ExecuteStreamContext>.fromOpaque(streamPtr).release()
         }
     }
 
     func emitExecuteStreamChunk(ctx: ExecuteStreamContext, chunk: UnsafePointer<CChar>) {
-        let token = String(cString: chunk)
-        let raw = token.hasPrefix("{") && token.contains("\"role\"")
-            ? extractTextFromResponse(token) : token
-        ctx.rawResponse += raw
+        let message = parseEngineMessage(String(cString: chunk))
+        ctx.toolCalls.append(contentsOf: message.toolCalls)
+        if !message.thinking.isEmpty {
+            ctx.thinking += message.thinking
+            // An empty token while the model reasons, as Android sends one:
+            // the app reads it as "Thinking…" rather than a stalled reply.
+            ctx.onToken("", false)
+        }
+        // A tool call or thinking chunk has no reply text to show.
+        guard !message.text.isEmpty else { return }
+        ctx.rawResponse += message.text
         let cleaned = stripControlTokens(ctx.rawResponse)
             .trimmingLeadingCharacters(in: .whitespacesAndNewlines)
         var processed = cleaned

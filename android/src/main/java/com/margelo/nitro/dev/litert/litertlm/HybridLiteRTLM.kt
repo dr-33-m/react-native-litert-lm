@@ -11,6 +11,7 @@ import android.app.ActivityManager
 import android.content.Context
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import androidx.annotation.Keep
 import com.facebook.proguard.annotations.DoNotStrip
@@ -53,6 +54,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
     companion object {
         private const val TAG = "HybridLiteRTLM"
+
+        /** How long a teardown waits for a cancelled decode loop to stop. */
+        private const val CANCEL_SETTLE_TIMEOUT_SECONDS = 2L
         private val initLock = Any()
 
         /** Cached result of OpenCL availability probe (null = not yet checked). */
@@ -87,6 +91,17 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     
     @Volatile
     private var isClosed = false
+
+    /**
+     * Latch of the streaming worker currently decoding, if any.
+     *
+     * Published so a teardown can wait for the decode loop to actually stop.
+     * Closing a conversation out from under a running worker deletes native
+     * state the worker is still reading, which is a crash the Kotlin side
+     * cannot catch.
+     */
+    @Volatile
+    private var activeStreamingLatch: CountDownLatch? = null
 
     private val modelStore = HybridModelStore()
     private var loadedModelPath: String? = null
@@ -240,8 +255,13 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     // Only Gemma 3n bundles vision/audio executors; Gemma 4 E2B is text-only.
                     // Passing vision/audio backends to a text-only model causes
                     // vision_litert_compiled_model_executor init failures.
+                    //
+                    // "gemma3" used to be on this list and was wrong: Gemma 3 1B
+                    // is text-only, and matching it here attached vision and
+                    // audio executors that the model has no weights for. Only
+                    // Gemma 3n is multimodal, and "3n" already catches it.
                     val modelFileName = modelPath.substringAfterLast("/").lowercase()
-                    val isMultimodal = config?.multimodal ?: (modelFileName.contains("3n") || modelFileName.contains("gemma3"))
+                    val isMultimodal = config?.multimodal ?: modelFileName.contains("3n")
     
                     // Get cache directory from application context
                     val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
@@ -251,6 +271,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         @OptIn(ExperimentalApi::class)
                         ExperimentalFlags.enableSpeculativeDecoding = true
                     }
+
+                    // The most recent engine failure, kept so the thrown error can say
+                    // what went wrong instead of only that everything was tried.
+                    var lastEngineError: String? = null
 
                     // Helper: attempt engine creation with given backends, return null on failure
                     fun tryCreateEngine(
@@ -278,6 +302,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                             }
                             Engine(cfg).also { it.initialize() }
                         } catch (e: Exception) {
+                            // Held onto because it is the only description of what
+                            // actually went wrong. Reporting only "tried everything"
+                            // turned a precise engine error ("Invalid magic number")
+                            // into an unactionable one by the time it reached JS.
+                            lastEngineError = e.message
                             Log.w(TAG, "Engine creation failed with backend $mainBackend: ${e.message}")
                             null
                         }
@@ -322,47 +351,44 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     
                     if (isClosed) return@synchronized
 
-                    // Attempt primary backend
-                    var eng = tryCreateEngine(lmBackend, lmVisionBackend, lmAudioBackend)
+                    // Engine configurations to try, each dropping one more
+                    // capability than the last and ending at plain text-only CPU.
+                    //
+                    // The text-only row matters even when CPU was the backend
+                    // asked for. A text-only model that gets sniffed as
+                    // multimodal fails with vision and audio executors attached
+                    // and loads the moment they are dropped, and gating this
+                    // whole chain on "the caller wanted GPU or NPU" left the
+                    // default CPU path with no recovery at all: one failed
+                    // attempt and straight to an error.
+                    fun cpu() = com.google.ai.edge.litertlm.Backend.CPU()
+                    val attempts = mutableListOf(
+                        Triple(lmBackend, lmVisionBackend, lmAudioBackend)
+                    )
+                    if (isMultimodal) {
+                        attempts += Triple(cpu(), com.google.ai.edge.litertlm.Backend.GPU(), cpu())
+                        attempts += Triple(cpu(), cpu(), cpu())
+                    }
+                    attempts += Triple(cpu(), null, null)
 
-                    // Fallback sequence if GPU/NPU fails to initialize (mirrors iOS behavior)
-                    if (eng == null && backend != Backend.CPU) {
-                        val requestedName = if (backend == Backend.GPU) "GPU" else "NPU"
-                        Log.w(TAG, "$requestedName backend failed — trying fallback chain...")
-
-                        // Fallback 1: CPU main + GPU vision + CPU audio
-                        eng = tryCreateEngine(
-                            com.google.ai.edge.litertlm.Backend.CPU(),
-                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.GPU() else null,
-                            if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-                        )
-
-                        // Fallback 2: Full CPU for all modalities
-                        if (eng == null) {
-                            eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
-                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null,
-                                if (isMultimodal) com.google.ai.edge.litertlm.Backend.CPU() else null
-                            )
-                        }
-
-                        // Fallback 3: Text-only CPU (no vision/audio executors)
-                        if (eng == null) {
-                            eng = tryCreateEngine(
-                                com.google.ai.edge.litertlm.Backend.CPU(),
-                                null,
-                                null
-                            )
-                        }
-
-                        if (eng != null) {
-                            Log.w(TAG, "$requestedName backend unavailable — fell back to CPU successfully")
+                    var eng: Engine? = null
+                    for ((index, attempt) in attempts.withIndex()) {
+                        if (isClosed) return@synchronized
+                        val (main, vision, audio) = attempt
+                        eng = tryCreateEngine(main, vision, audio)
+                        if (eng == null) continue
+                        if (index > 0) {
+                            Log.w(TAG, "Primary backend failed; loaded on fallback #$index (main=$main, vision=$vision, audio=$audio)")
+                            // Every fallback runs the main graph on CPU, so the
+                            // reported active backend has to follow.
                             backend = Backend.CPU
                         }
+                        break
                     }
 
                     engine = eng ?: throw RuntimeException(
-                        "Failed to create LiteRT-LM engine. Tried primary backend and all CPU fallbacks."
+                        "Failed to create LiteRT-LM engine after ${attempts.size} attempts: " +
+                            (lastEngineError ?: "no error reported")
                     )
                     Log.i(TAG, "Engine created and initialized successfully")
     
@@ -557,10 +583,33 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
     }
 
     override fun resetConversation() {
+        // A reset that recreates the conversation under a running decode loop
+        // deletes the native state that loop is still reading.
+        cancelInFlightGeneration()
         synchronized(history) {
             history.clear()
         }
         createNewConversation()
+    }
+
+    override fun resetConversationWith(messages: Array<Message>) {
+        val seed = messages.map { msg ->
+            LiteRTMessage(
+                role = when (msg.role) {
+                    Role.MODEL -> com.google.ai.edge.litertlm.Role.MODEL
+                    Role.SYSTEM -> com.google.ai.edge.litertlm.Role.SYSTEM
+                    else -> com.google.ai.edge.litertlm.Role.USER
+                },
+                contents = Contents.of(Content.Text(msg.content))
+            )
+        }
+        synchronized(history) {
+            history.clear()
+            history.addAll(messages.toList())
+        }
+        // Recreating the conversation is what actually frees the old KV cache;
+        // the seed is replayed into the new one without triggering generation.
+        createNewConversation(seed)
     }
 
     override fun isReady(): Boolean {
@@ -575,7 +624,10 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         return lastStats
     }
 
-    override fun getMemoryUsage(): MemoryUsage {
+    /** Shared by the public [getMemoryUsage] override and the pre-flight guard
+     * in [execute] — both need the same real, OS-level reading, not an
+     * estimate. */
+    private fun currentMemoryUsage(): MemoryUsage {
         // Native heap: allocated bytes from Debug APIs (most accurate for native allocations)
         val nativeHeapBytes = Debug.getNativeHeapAllocatedSize().toDouble()
 
@@ -619,6 +671,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         )
     }
 
+    override fun getMemoryUsage(): MemoryUsage = currentMemoryUsage()
+
     override fun checkModelCapabilities(modelPath: String): ModelCapabilities {
         var supportsSpeculativeDecoding = false
         try {
@@ -642,22 +696,89 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
+    /**
+     * Signal the native decode loop to stop, then wait for the streaming worker
+     * to settle.
+     *
+     * `cancelProcess()` only asks; the worker keeps running until it notices.
+     * Anything that then closes or recreates the conversation would be deleting
+     * native state while that worker still reads it, so every such path waits
+     * here first. The timeout is a backstop: a worker that never settles is
+     * worth a warning and a teardown anyway, because the alternative is hanging
+     * the caller forever.
+     */
+    private fun cancelInFlightGeneration() {
+        val latch = activeStreamingLatch ?: return
+        try {
+            conversation?.cancelProcess()
+            if (!latch.await(CANCEL_SETTLE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                Log.w(TAG, "cancelInFlightGeneration: worker did not settle in time")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "cancelInFlightGeneration: ${e.message}")
+        }
+    }
+
+    /**
+     * Free the engine and its KV cache while leaving this instance usable.
+     *
+     * The distinction from `close()` is the whole point: `close()` sets
+     * `isClosed`, after which even `loadModel()` is refused, so using it to
+     * answer memory pressure permanently retired an instance that JS still
+     * held and believed in.
+     */
+    fun releaseUnderMemoryPressure() {
+        // Nothing loaded is nothing to free, and saying otherwise turns one
+        // emergency into a page of identical warnings.
+        if (engine == null) return
+        Log.w(TAG, "Releasing engine under memory pressure; instance stays reloadable")
+        cleanupInternal()
+    }
+
     override fun close() {
         Log.d(TAG, "Closing resources")
         isClosed = true
         cleanupInternal()
+        // A closed instance can never load again, so it has no business being
+        // woken by the next memory emergency.
+        LiteRTLMRegistry.unregister(this)
     }
 
     private fun cleanupInternal() {
+        // Outside the lock: the decode loop does not need initLock, and waiting
+        // for it while holding the lock would block loadModel behind it.
+        cancelInFlightGeneration()
         synchronized(initLock) {
+            /*
+             * Dropped first, closed second.
+             *
+             * These used to be nulled after their `close()` calls, inside one
+             * try. A close that threw — and closing a conversation that has
+             * just been cancelled is exactly when one does — skipped the rest
+             * of the block and left a retired engine still referenced. Nothing
+             * downstream could tell: `isReady()` reads `engine != null`, so the
+             * instance went on reporting itself loaded, and the next
+             * `resetConversation()` called `createConversation` on a closed
+             * engine and threw "Engine is not initialized" from deep in the SDK.
+             *
+             * Letting go of the references first makes that impossible: after
+             * this block the instance is unloaded whatever the native side did.
+             */
+            val retiredConversation = conversation
+            val retiredEngine = engine
+            conversation = null
+            engine = null
+            loadedModelPath = null
+
             try {
-                conversation?.close()
-                conversation = null
-                engine?.close()        // Direct call
-                engine = null 
-                loadedModelPath = null
+                retiredConversation?.close()
             } catch (e: Exception) {
-                Log.e(TAG, "Error closing resources", e)
+                Log.w(TAG, "Error closing conversation: ${e.message}")
+            }
+            try {
+                retiredEngine?.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing engine: ${e.message}")
             }
         }
     }
@@ -668,7 +789,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         }
     }
 
-    private fun createNewConversation() {
+    private fun createNewConversation(initialMessages: List<LiteRTMessage> = emptyList()) {
         ensureLoaded()
         // v0.10.2 enforces single-session: close existing conversation first
         conversation?.let { oldConv ->
@@ -679,7 +800,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
             }
             conversation = null
         }
-        // Map tools — capture tool calls for JS instead of executing natively
+        // Map tools. The engine only parses calls; JS runs them (see `automaticToolCalling`).
         val lmTools: List<ToolProvider>? = tools?.map { toolDef ->
             val apiTool = object : OpenApiTool {
                 override fun getToolDescriptionJsonString(): String {
@@ -691,12 +812,9 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     return fullDesc.toString()
                 }
                 override fun execute(paramsJsonString: String): String {
-                    Log.d(TAG, "Tool called: ${toolDef.name} with args: $paramsJsonString")
-                    pendingToolCalls.add(ToolCall(
-                        name = toolDef.name,
-                        argumentsJson = paramsJsonString
-                    ))
-                    return "{\"status\": \"pending\", \"message\": \"Tool execution delegated to application\"}"
+                    // Never invoked: automatic tool calling is off, so tool
+                    // execution happens on the JS side.
+                    return "{}"
                 }
             }
             tool(apiTool)
@@ -711,11 +829,24 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                 temperature = temperature.toDouble(),
             ),
             systemInstruction = systemPrompt?.let { Contents.of(Content.Text(it)) },
-            tools = lmTools ?: emptyList()
+            initialMessages = initialMessages,
+            tools = lmTools ?: emptyList(),
+            /*
+             * Off, ported from upstream (hung-yueh 2cc938a). The SDK default runs
+             * each parsed call against `execute()` above, which was a stub, and
+             * feeds that stub's reply straight back to the model in the same
+             * turn. The model then answered the stub: prose claiming a result it
+             * never had ("I have removed it…"), streamed to the reader, then
+             * discarded once JS ran the real tool and generated again. A wasted
+             * generation per call, and its tokens stayed in the KV cache.
+             * With it off, calls arrive on `Message.toolCalls` instead.
+             */
+            automaticToolCalling = false,
+            // Available since LiteRT-LM 0.15.0; before that the Kotlin SDK had no
+            // way to express it and every Android reply ran to the engine default.
+            maxOutputToken = maxOutputTokens,
         )
-        // TODO: maxOutputTokens is not configurable on Android — the Kotlin SDK's
-        // ConversationConfig does not expose this parameter. Only EngineConfig.maxNumTokens
-        // (context budget) is supported. maxOutputTokens is effective on iOS only.
+
         //
         // Upstream is actively adding max_output_tokens across API surfaces:
         //   - C API:    PR #2470 (merged 2026-06-04)
@@ -724,7 +855,12 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
         //   - Kotlin:   Not yet available — track at https://github.com/google-ai-edge/LiteRT-LM
         //
         // Once the Kotlin SDK exposes this, wire it via ConversationConfig here.
-        conversation = engine!!.createConversation(convConfig)
+        // Checked rather than forced: this runs from `resetConversation`, which
+        // JS calls on paths that do not first ask whether anything is loaded.
+        // A named error beats a null-pointer dereference from inside the SDK.
+        val activeEngine = engine
+            ?: throw RuntimeException("Cannot create a conversation: no model is loaded.")
+        conversation = activeEngine.createConversation(convConfig)
     }
 
 
@@ -784,6 +920,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
         return Promise.parallel {
             ensureLoaded()
+
+            // Refuse rather than risk it: growing the KV-cache under real memory
+            // pressure can fail at the native engine level in a way that never
+            // surfaces as a catchable Kotlin exception — it takes the whole
+            // process down. A plain RuntimeException here is a normal rejected
+            // Promise for callers, same contract as any other execute() failure.
+            if (currentMemoryUsage().isLowMemory) {
+                throw RuntimeException("LiteRTLM: Device memory is critically low; refusing to continue generation.")
+            }
+
             // Clear any previous tool calls before new inference
             pendingToolCalls.clear()
 
@@ -855,11 +1001,22 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
 
                 val userMsg = LiteRTMessage.user(Contents.of(contents))
 
-                val extraContext: Map<String, String> = if (enableThinking) mapOf("enable_thinking" to "true") else emptyMap()
+                // Always stated, never omitted.
+                //
+                // `enable_thinking` is a chat-template variable, not a Gemma
+                // feature, and templates test it as "defined and false". Qwen3's
+                // is exactly that shape, so leaving the key out is not the same
+                // as setting it to false: undefined falls through to the
+                // template's own default, which for a reasoning model is to
+                // reason. Omitting it meant thinking could be turned on but
+                // never off, and the reasoning arrived inline in the answer.
+                val extraContext: Map<String, String> =
+                    mapOf("enable_thinking" to enableThinking.toString())
 
                 if (onToken != null) {
                     // ── Streaming path ────────────────────────────────────────────────
                     val latch = CountDownLatch(1)
+                    activeStreamingLatch = latch
                     val errorRef = AtomicReference<Throwable?>(null)
                     val fullResponseBuilder = StringBuilder()
                     val thinkingBuilder = StringBuilder()
@@ -874,7 +1031,8 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         history = history,
                         userMessage = userTextRepresentation,
                         onStatsReady = { stats -> lastStats = stats },
-                        onFailure = { e -> errorRef.set(e) }
+                        onFailure = { e -> errorRef.set(e) },
+                        onToolCalls = { calls -> captureToolCalls(calls) }
                     )
 
                     try {
@@ -886,7 +1044,11 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         latch.countDown()
                     }
 
-                    latch.await()
+                    try {
+                        latch.await()
+                    } finally {
+                        activeStreamingLatch = null
+                    }
                     errorRef.get()?.let { throw RuntimeException("execute streaming failed: ${it.message}", it) }
                     val capturedToolCalls = synchronized(pendingToolCalls) {
                         pendingToolCalls.toTypedArray().also { pendingToolCalls.clear() }
@@ -908,6 +1070,7 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                         .joinToString("") { it.text }
 
                     val thinkingText = responseMsg.channels["thought"] ?: ""
+                    captureToolCalls(responseMsg.toolCalls)
 
                     history.add(Message(Role.MODEL, response))
 
@@ -938,6 +1101,15 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
                     }
                 }
             }
+        }
+    }
+
+    /** Records SDK-parsed calls in the shape JS receives on `ExecuteResult.toolCalls`. */
+    private fun captureToolCalls(calls: List<com.google.ai.edge.litertlm.ToolCall>?) {
+        for (call in calls.orEmpty()) {
+            val argumentsJson = org.json.JSONObject(call.arguments).toString()
+            Log.d(TAG, "Tool called: ${call.name} with args: $argumentsJson")
+            pendingToolCalls.add(ToolCall(name = call.name, argumentsJson = argumentsJson))
         }
     }
 

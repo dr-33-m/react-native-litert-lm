@@ -49,6 +49,27 @@ describe('modelFactory Security & Proxy Unit Tests', () => {
     expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
   });
 
+  it('should successfully proxy resetConversationWith and record memory metrics', async () => {
+    const seed = [{ role: 'user', content: 'earlier turn' }];
+    await llm.resetConversationWith(seed as never);
+
+    expect(mockLiteRTLM.resetConversationWith).toHaveBeenCalledWith(seed);
+    expect(mockLiteRTLM.getMemoryUsage).toHaveBeenCalled();
+  });
+
+  it('should report resetConversationWith as absent on older native builds', () => {
+    // The app feature-detects this method, so the proxy must not hand back a
+    // wrapper the native side cannot service.
+    const original = mockLiteRTLM.resetConversationWith;
+    // @ts-expect-error deliberately removing the method to simulate old native
+    delete mockLiteRTLM.resetConversationWith;
+    try {
+      expect(createLLM().resetConversationWith).toBeUndefined();
+    } finally {
+      mockLiteRTLM.resetConversationWith = original;
+    }
+  });
+
   it('should successfully proxy sendMessageAsync and record memory metrics when done', async () => {
     const onToken = jest.fn();
     await llm.sendMessageAsync("Async prompt", onToken);
